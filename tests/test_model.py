@@ -1,6 +1,6 @@
-"""The torch side: model shapes, freezing, ONNX export parity and a two-epoch smoke run (needs the train extra).
+"""The torch side: model shape, freezing, ONNX export parity and a two-epoch smoke run (needs the train extra).
 
-The models are built without pretrained weights, so nothing is downloaded.
+The model is built without pretrained weights, so nothing is downloaded.
 """
 
 import numpy as np
@@ -10,23 +10,20 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("timm")
 
 from ss_hot.export import build_model, export_onnx_bytes  # noqa: E402
-from ss_hot.model import decoder_of, encoder_stage_modules  # noqa: E402
+from ss_hot.model import encoder_stage_modules  # noqa: E402
 from ss_hot.params import WINDOW_PX, TrainParams  # noqa: E402
 from ss_hot.train import freeze, loss_parts, optimizer_groups, stitch_logits  # noqa: E402
 
 
-@pytest.mark.parametrize("decoder", ["upernet", "unet"])
-def test_logits_have_the_input_size_and_the_decoder_is_recognised(decoder, tmp_path):
-    model = build_model(decoder=decoder)
+def test_logits_have_the_input_size_and_the_stages_are_named(tmp_path):
+    model = build_model()
     with torch.no_grad():
         logits = model(torch.rand(2, 3, 128, 160))
     assert logits.shape == (2, 1, 128, 160)
     assert sorted(encoder_stage_modules(model)) == ["stage0", "stage1", "stage2", "stage3"]
-    assert decoder_of(model.state_dict()) == decoder
     torch.save(model.state_dict(), tmp_path / "m.pt")
-    assert build_model(weights=tmp_path / "m.pt").decoder_name == decoder
-    with pytest.raises(ValueError):
-        build_model(decoder="unet" if decoder == "upernet" else "upernet", weights=tmp_path / "m.pt")
+    reloaded = build_model(weights=tmp_path / "m.pt")
+    assert all(torch.equal(a, b) for a, b in zip(model.state_dict().values(), reloaded.state_dict().values()))
 
 
 def test_freezing_keeps_only_the_later_stages_and_the_decoder_trainable():
@@ -52,10 +49,9 @@ def test_loss_and_stitching():
     assert stitched[0, 0, 2].tolist() == [2, 2, 3, 3]
 
 
-@pytest.mark.parametrize("decoder", ["upernet", "unet"])
-def test_onnx_matches_torch(decoder):
+def test_onnx_matches_torch():
     ort = pytest.importorskip("onnxruntime")
-    model = build_model(decoder=decoder)
+    model = build_model()
     session = ort.InferenceSession(export_onnx_bytes(model), providers=["CPUExecutionProvider"])
     windows = np.random.default_rng(0).random((3, 3, WINDOW_PX, WINDOW_PX), dtype=np.float32)
     (onnx_probability,) = session.run(None, {"image": windows})
@@ -65,10 +61,10 @@ def test_onnx_matches_torch(decoder):
     assert np.abs(onnx_probability - torch_probability).max() < 1e-4
 
 
-def test_a_short_training_run_finishes_reports_every_epoch_and_sweeps_the_threshold(mask_dataset):
+def test_a_short_training_run_finishes_and_reports_every_epoch(fair_dataset):
     from ss_hot.train import train
 
-    images, masks, _ = mask_dataset
+    images, masks, _ = fair_dataset
     seen = []
     result = train(
         train_images_dir=images, train_labels=masks, val_images_dir=images, val_labels=masks,
@@ -78,4 +74,3 @@ def test_a_short_training_run_finishes_reports_every_epoch_and_sweeps_the_thresh
     assert [epoch for epoch, _ in seen] == [1, 2]
     assert {"train_loss", "val_loss", "val_iou", "val_f1"} <= set(seen[0][1])
     assert len(result.history["train_loss"]) == 2 and not result.model.training
-    assert 0.0 < result.threshold < 1.0 and "border_iou" in result.threshold_metrics

@@ -110,7 +110,7 @@ The model stays UPerNet + ConvNeXt-Tiny v1. Applied on 2026-11-20 (see `progress
   gone.
 - Chip joining, 512 px windows and the 255 ignore value are gone: one tile is one sample, masks are 0/1. A scaled
   tile larger than 256 px is cropped at random for training; a smaller one is mirrored, image and mask together.
-- Tile bounds come from the `OAM-x-y-z` name when a file has no georeferencing (GeoJSON labels and output).
+- Labels are one GeoJSON per split over georeferenced GeoTIFF chips, as fAIr provides them (no mask folders).
 - Postprocess sizes are in m² / m (`min_area_m2`, `fill_holes_m2`, `simplify_m`, `open_m`, `close_m`), turned into
   model pixels with `model_gsd_m`; decoding itself stays in pixels.
 - Removed: `MAX_INPUT_PX`, `smooth_sigma_px` (Gaussian smoothing of the probability before the threshold; off by
@@ -126,10 +126,10 @@ tiles. Those are upscaled once to 0.92 cm (zoom 23 x 2, zoom 22 x 4; zoom 21 and
   new steps against a second random training tile: randomised histogram matching (probability 0.3) and CutMix
   (probability 0.5). `water_tint` and the contrast/saturation stretch are gone. The probabilities are starting values,
   not tuned.
-- The training run ends with an F1 threshold sweep on validation (`history.json`); serve with that threshold.
-- Evaluation reports IoU / F1 for the 16 px band along each window edge and for the centre, to measure tile-edge
-  error.
-- A U-Net + ConvNeXt-T control (`decoder: "unet"`), trained the same way, to justify UPerNet.
+- The serving threshold comes from the F1 sweep of `scripts/evaluate.py` on the validation chips.
+- Experiments in `research/` (git-ignored, not in the package): `border_band.py` scores the 16 px band along window
+  edges against the centre, to measure tile-edge error; `unet_control.py` trains a U-Net + ConvNeXt-T control with the
+  library's training loop, to justify UPerNet.
 - The README states that the test split shares imagery with training; an outside test (SeagrassMapper) needs a
   download.
 

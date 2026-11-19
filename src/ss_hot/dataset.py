@@ -141,15 +141,24 @@ class LabelSource:
             t, crs, (west, south, east, north) = src.transform, src.crs, src.bounds
             sx, sy = src.width / width, src.height / height
         polygons, bounds = self._in_crs(crs)
-        near = (bounds[:, 0] <= east) & (bounds[:, 2] >= west) & (bounds[:, 1] <= north) & (bounds[:, 3] >= south)
+        near = (
+            (bounds[:, 0] <= east)
+            & (bounds[:, 2] >= west)
+            & (bounds[:, 1] <= north)
+            & (bounds[:, 3] >= south)
+        )
         shapes = [
             ({"type": "Polygon", "coordinates": [ring.tolist() for ring in polygons[i]]}, SEAGRASS)
             for i in np.flatnonzero(near)
         ]
         if not shapes:
             return np.zeros((height, width), dtype=np.uint8)
-        transform = Affine(t.a * sx, t.b * sy, t.c, t.d * sx, t.e * sy, t.f)  # the chip's transform, scaled pixels
-        return rasterize(shapes, out_shape=(height, width), transform=transform, fill=BACKGROUND, dtype="uint8")
+        transform = Affine(
+            t.a * sx, t.b * sy, t.c, t.d * sx, t.e * sy, t.f
+        )  # the chip's transform, scaled pixels
+        return rasterize(
+            shapes, out_shape=(height, width), transform=transform, fill=BACKGROUND, dtype="uint8"
+        )
 
 
 def scale_pair(

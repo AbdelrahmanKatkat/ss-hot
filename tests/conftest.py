@@ -3,18 +3,17 @@ import json
 import numpy as np
 import pytest
 import rasterio
-from PIL import Image
 from pyproj import Transformer
 from rasterio.transform import from_origin
 
 ORIGIN_X, ORIGIN_Y = (
     1_000_000.0,
     2_000_000.0,
-)  # top-left corner of every synthetic georeferenced tile, EPSG:3857
+)  # top-left corner of the synthetic georeferenced chips, EPSG:3857, 1 m pixels
 
-# A zoom-24 training tile in Timor-Leste: 0.923 cm pixels, within 2% of the model resolution, so it is not resampled.
+# A zoom-24 training chip in Timor-Leste: 0.923 cm pixels, within 2% of the model resolution, so it is not resampled.
 CHIP_NAME = "OAM-14246392-8787682-24.tif"
-# A zoom-22 tile near the equator: 3.73 cm pixels, upscaled x 4.06 (256 -> 1039 px) to the model resolution.
+# A zoom-22 chip near the equator: 3.73 cm pixels, upscaled x 4.06 (256 -> 1039 px) to the model resolution.
 COARSE_NAME = "OAM-2097152-2097152-22.tif"
 
 
@@ -44,10 +43,16 @@ class FakeSession:
 
 @pytest.fixture
 def write_chip(tmp_path):
-    """Write a synthetic RGB tile: a georeferenced GeoTIFF (EPSG:3857, 1 m pixels) or, with `crs=None`, a plain one."""
+    """Write a synthetic RGB chip: a georeferenced GeoTIFF (EPSG:3857, 1 m pixels, top-left at `origin` pixels from
+    the shared origin) or, with `crs=None`, a plain one."""
 
     def _write(
-        name: str = CHIP_NAME, size: int = 256, folder=None, crs: str | None = "EPSG:3857", seed: int = 0
+        name: str = CHIP_NAME,
+        size: int = 256,
+        folder=None,
+        crs: str | None = "EPSG:3857",
+        seed: int = 0,
+        origin: tuple[int, int] = (0, 0),
     ):
         directory = folder or tmp_path
         directory.mkdir(parents=True, exist_ok=True)
@@ -55,7 +60,8 @@ def write_chip(tmp_path):
         data = np.random.default_rng(seed).integers(0, 256, size=(3, size, size), dtype=np.uint8)
         profile = dict(driver="GTiff", height=size, width=size, count=3, dtype="uint8")
         if crs is not None:
-            profile.update(crs=crs, transform=from_origin(ORIGIN_X, ORIGIN_Y, 1.0, 1.0))
+            x, y = ORIGIN_X + origin[0], ORIGIN_Y - origin[1]
+            profile.update(crs=crs, transform=from_origin(x, y, 1.0, 1.0))
         with rasterio.open(path, "w", **profile) as dst:
             dst.write(data)
         return path
@@ -64,7 +70,7 @@ def write_chip(tmp_path):
 
 
 def lon_lat(col: float, row: float) -> list[float]:
-    """Longitude and latitude of pixel `(col, row)` of a synthetic georeferenced tile."""
+    """Longitude and latitude of pixel `(col, row)` counted from the shared origin of the synthetic chips."""
     return list(
         Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform(
             ORIGIN_X + col, ORIGIN_Y - row
@@ -72,30 +78,32 @@ def lon_lat(col: float, row: float) -> list[float]:
     )
 
 
+def write_labels(path, boxes: list[tuple[float, float, float, float]]) -> None:
+    """A labels GeoJSON (EPSG:4326) with one seagrass rectangle per `(col0, row0, col1, row1)` box, in pixels."""
+    features = []
+    for c0, r0, c1, r1 in boxes:
+        ring = [lon_lat(c0, r0), lon_lat(c1, r0), lon_lat(c1, r1), lon_lat(c0, r1), lon_lat(c0, r0)]
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {"seamark:type": "seagrass"},
+                "geometry": {"type": "Polygon", "coordinates": [ring]},
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
+
+
 @pytest.fixture
-def mask_dataset(tmp_path, write_chip):
-    """A 2 x 2 grid of plain 256 px zoom-24 tiles with 0/1 masks: the left column all seagrass, the right one not."""
-    images, masks = tmp_path / "images", tmp_path / "masks"
-    masks.mkdir()
+def fair_dataset(tmp_path, write_chip):
+    """The fAIr layout: a 2 x 2 grid of georeferenced 256 px zoom-24 chips and one `labels.geojson` whose single
+    polygon covers the left column (seagrass) and not the right one."""
+    chips, labels = tmp_path / "chips", tmp_path / "labels" / "labels.geojson"
     names = []
     for dx in range(2):
         for dy in range(2):
             name = f"OAM-{2**23 + dx}-{2**23 + dy}-24.tif"
-            write_chip(name=name, folder=images, crs=None, seed=dx * 2 + dy)
-            Image.fromarray(np.full((256, 256), 1 if dx == 0 else 0, dtype=np.uint8)).save(
-                masks / f"{name[:-4]}.png"
-            )
+            write_chip(name=name, folder=chips, seed=dx * 2 + dy, origin=(256 * dx, 256 * dy))
             names.append(name)
-    return images, masks, sorted(names)
-
-
-@pytest.fixture
-def geojson_dataset(tmp_path, write_chip):
-    """One georeferenced tile and a GeoJSON with a seagrass square over its top-left 128 x 128 px."""
-    chips, labels = tmp_path / "chips", tmp_path / "labels"
-    labels.mkdir()
-    write_chip(name=CHIP_NAME, folder=chips)
-    square = [lon_lat(0, 0), lon_lat(128, 0), lon_lat(128, 128), lon_lat(0, 128), lon_lat(0, 0)]
-    feature = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [square]}}
-    (labels / "labels.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": [feature]}))
-    return chips, labels
+    write_labels(labels, [(0, 0, 256, 512)])
+    return chips, labels, sorted(names)

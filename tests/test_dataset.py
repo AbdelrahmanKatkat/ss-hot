@@ -1,90 +1,52 @@
-import json
-
 import numpy as np
 import pytest
-from PIL import Image
-from pyproj import Transformer
 
-from conftest import CHIP_NAME, COARSE_NAME
-from ss_hot.dataset import (
-    BACKGROUND,
-    SEAGRASS,
-    LabelSource,
-    fit_tile,
-    read_mask,
-    scale_mask,
-    scale_pair,
-    spatial_split,
-)
+from conftest import COARSE_NAME, write_labels
+from ss_hot.dataset import BACKGROUND, SEAGRASS, LabelSource, fit_tile, scale_pair, spatial_split
 from ss_hot.params import MODEL_GSD_M, PreprocessParams
-from ss_hot.tiles import chip_scale, tile_transform
+from ss_hot.tiles import chip_scale
 
 
-def test_masks_only_take_background_and_seagrass(tmp_path):
-    path = tmp_path / "m.png"
-    Image.fromarray(np.array([[0, 1, 1]], dtype=np.uint8)).save(path)
-    assert read_mask(path).tolist() == [[0, 1, 1]]
-    Image.fromarray(np.array([[0, 255]], dtype=np.uint8)).save(path)
-    with pytest.raises(ValueError, match="0 or 1"):
-        read_mask(path)
+def test_labels_are_drawn_on_each_chip_from_one_geojson(fair_dataset):
+    chips, labels, names = fair_dataset
+    source = LabelSource.from_path(labels.parent)  # a folder holding one GeoJSON works too
+    assert len(source.polygons) == 1
+    left, right = chips / names[0], chips / names[-1]
+    assert (source.mask(left, 256, 256) == SEAGRASS).all() and (
+        source.mask(right, 256, 256) == BACKGROUND
+    ).all()
 
 
-def test_a_downscaled_mask_keeps_the_majority_label():
-    mask = np.zeros((4, 4), dtype=np.uint8)
-    mask[:, :3] = SEAGRASS  # the left column of the result is all seagrass, the right one half
-    small = scale_mask(mask, 2, 2)
-    assert small[:, 0].tolist() == [SEAGRASS, SEAGRASS] and set(small[:, 1].tolist()) <= {
-        BACKGROUND,
-        SEAGRASS,
-    }
-    assert scale_mask(mask, 4, 4).tolist() == mask.tolist()
-
-
-def test_label_source_reads_a_mask_folder_and_a_geojson(mask_dataset, geojson_dataset):
-    images, masks, names = mask_dataset
-    assert LabelSource.from_path(masks).masks_dir == masks
-    chips, labels = geojson_dataset
+def test_masks_are_drawn_at_the_scaled_size(write_chip, tmp_path):
+    chip = write_chip(folder=tmp_path / "chips")
+    labels = tmp_path / "labels.geojson"
+    write_labels(labels, [(0, 0, 128, 128)])
     source = LabelSource.from_path(labels)
-    assert source.masks_dir is None and len(source.polygons) == 1
-    mask = source.mask(next(chips.iterdir()), 256, 256)
-    assert mask[:128, :128].min() == SEAGRASS and mask[130:, 130:].max() == 0
-    half = source.mask(next(chips.iterdir()), 64, 64)  # drawn at the scaled size, so edges stay sharp
+    mask = source.mask(chip, 256, 256)
+    assert mask[:128, :128].min() == SEAGRASS and mask[130:, :].max() == 0 and mask[:, 130:].max() == 0
+    half = source.mask(chip, 64, 64)  # drawn at the scaled size, so edges stay sharp
     assert half[:32, :32].min() == SEAGRASS and half[33:, 33:].max() == 0
 
 
-def test_geojson_labels_on_a_plain_tile_are_placed_by_its_name(write_chip, tmp_path):
-    chip = write_chip(name=CHIP_NAME, folder=tmp_path / "chips", crs=None)
-    t = tile_transform(CHIP_NAME, 256, 256)
-    to_lonlat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform
-    corners = [(0, 0), (128, 0), (128, 128), (0, 128), (0, 0)]
-    square = [list(to_lonlat(t.c + col * t.a, t.f + row * t.e)) for col, row in corners]
+def test_a_chip_without_georeferencing_is_refused(write_chip, tmp_path):
     labels = tmp_path / "labels.geojson"
-    feature = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [square]}}
-    labels.write_text(json.dumps({"type": "FeatureCollection", "features": [feature]}))
-    mask = LabelSource.from_path(labels).mask(chip, 256, 256)
-    assert mask[2:126, 2:126].min() == SEAGRASS and mask[130:, :].max() == 0 and mask[:, 130:].max() == 0
+    write_labels(labels, [(0, 0, 10, 10)])
+    with pytest.raises(ValueError, match="no CRS"):
+        LabelSource.from_path(labels).mask(write_chip(folder=tmp_path / "plain", crs=None), 8, 8)
 
 
-def test_a_tile_without_a_mask_raises(mask_dataset):
-    images, masks, names = mask_dataset
-    (masks / f"{names[0][:-4]}.png").unlink()
-    with pytest.raises(FileNotFoundError):
-        LabelSource(masks_dir=masks).mask(images / names[0], 8, 8)
-
-
-def test_scale_pair_keeps_a_training_tile_and_upscales_a_coarse_one(mask_dataset, write_chip, tmp_path):
-    images, masks, names = mask_dataset
-    source = LabelSource(masks_dir=masks)
-    image, mask = scale_pair(images / names[0], source, PreprocessParams())
+def test_scale_pair_keeps_a_training_chip_and_upscales_a_coarse_one(fair_dataset, write_chip, tmp_path):
+    chips, labels, names = fair_dataset
+    source = LabelSource.from_path(labels)
+    image, mask = scale_pair(chips / names[0], source, PreprocessParams())
     assert image.shape == (3, 256, 256) and (mask == SEAGRASS).all()
-    coarse = write_chip(name=COARSE_NAME, folder=tmp_path / "coarse", crs=None)
-    Image.fromarray(np.ones((256, 256), dtype=np.uint8)).save(masks / f"{COARSE_NAME[:-4]}.png")
+    coarse = write_chip(name=COARSE_NAME, folder=tmp_path / "coarse")  # over the labelled left column
     image, mask = scale_pair(coarse, source, PreprocessParams())
     side = round(256 * chip_scale(COARSE_NAME, 256, MODEL_GSD_M))
     assert image.shape == (3, side, side) and mask.shape == (side, side) and (mask == SEAGRASS).all()
 
 
-def test_fit_tile_crops_a_larger_tile_and_reflects_a_smaller_one_with_its_labels():
+def test_fit_tile_crops_a_larger_chip_and_reflects_a_smaller_one_with_its_labels():
     image = np.random.default_rng(0).random((3, 300, 700), dtype=np.float32)
     mask = (np.arange(700)[None, :] < 350).repeat(300, axis=0).astype(np.uint8)
     cropped_image, cropped_mask = fit_tile(image, mask, 256, np.random.default_rng(0))

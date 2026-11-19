@@ -11,7 +11,7 @@ from ss_hot.preprocess import (
     stitch_windows,
     to_windows,
 )
-from ss_hot.tiles import chip_scale, tile_gsd_m, tile_transform
+from ss_hot.tiles import chip_scale, tile_gsd_m
 
 
 def test_a_training_tile_is_used_as_it_is_and_a_coarser_one_is_upscaled():
@@ -23,12 +23,6 @@ def test_a_training_tile_is_used_as_it_is_and_a_coarser_one_is_upscaled():
 def test_too_coarse_a_zoom_is_refused():
     with pytest.raises(ValueError, match="too coarse"):
         chip_scale("OAM-1048576-1048576-21.tif", 256, MODEL_GSD_M)  # zoom 21 needs x 8.1
-
-
-def test_the_footprint_comes_from_the_name():
-    transform = tile_transform("OAM-1-0-1.png", 256, 256)  # the north-east quarter of the world
-    assert transform.c == pytest.approx(0.0) and transform.f == pytest.approx(20037508.34, abs=0.01)
-    assert transform.a == pytest.approx(20037508.34 / 256) and transform.e == pytest.approx(-transform.a)
 
 
 def test_scaling_keeps_range_layout_and_rounds_the_size():
@@ -60,8 +54,6 @@ def test_a_training_tile_is_one_window_and_keeps_its_georeferencing(write_chip):
     assert str(meta.crs) == "EPSG:3857" and meta.transform.a == 1.0  # the file's own transform
 
 
-def test_a_plain_tile_is_placed_by_its_name(write_chip, tmp_path):
-    _, plain = preprocess_chip(write_chip(name=CHIP_NAME, folder=tmp_path / "plain", crs=None))
-    assert plain.crs == "EPSG:3857" and plain.transform == tile_transform(CHIP_NAME, 256, 256)
-    _, transform, crs = read_chip(write_chip(name="photo.tif", crs=None))  # no OAM name: no map position
+def test_a_chip_without_georeferencing_has_no_crs(write_chip, tmp_path):
+    _, transform, crs = read_chip(write_chip(folder=tmp_path / "plain", crs=None))
     assert crs is None and transform.a == 1.0

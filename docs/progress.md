@@ -79,17 +79,21 @@ bottom.
   georeferencing are placed by their OAM name (`tiles.tile_transform`); postprocess sizes in metres
   (`PostprocessParams`), converted to pixels for decoding (`decode.DecodeParams`, `postprocess.decode_params`).
 - [x] Research-based changes: histogram matching and CutMix added, `water_tint` and `stretch` removed, zoom-in-only
-  scale jitter; F1 threshold sweep on validation at the end of training (`TrainResult.threshold`, `history.json`);
-  border-band metrics (`border_*`, `centre_*`); U-Net + ConvNeXt-T control (`decoder: "unet"`, `SeagrassNet`, the
-  decoder is read back from a checkpoint); validation stitches window predictions as at serving.
+  scale jitter; validation stitches window predictions as at serving.
 - [x] Checks run: `ruff check` / `ruff format` clean on src, tests and scripts. No environment here has pytest and the
   library dependencies together (the project `.venv` is gone; recreating it was blocked), so the test suite was **not
   run**. Instead, with the system Python 3.10 (torch, rasterio, onnxruntime; no timm): the `tiles` doctests (4 pass),
   a smoke run of serving, postprocess, scoring, the dataset (including a real training tile) and the augmentation
   preset, and ONNX export of both decoder heads at 256 px on stand-in encoder features (largest difference vs torch
   1.2e-6 UPerNet, 1.9e-7 U-Net).
-- [ ] Recreate the `.venv` (`uv sync --extra test`), install `timm` (asked first), run the full test suite including
-  `tests/test_model.py` (both decoders: shapes, ONNX parity, two-epoch training with the threshold sweep).
+- [x] Review against the repo skills (library vs `research/`): labels are GeoJSON only (fAIr gives georeferenced
+  GeoTIFF chips plus one `labels.geojson`), so the mask-folder reader and placing chips by their OAM name are removed;
+  the U-Net control and the border-band metric are experiments, moved to `research/unet_control.py` and
+  `research/border_band.py`; the threshold sweep is no longer inside `train()` (it is `scripts/evaluate.py` on
+  validation).
+- [ ] The local dataset (`F:\HOTOSM\seagrass\data`) is still `images/` (not georeferenced) + `masks/` + per-tile
+  `labels/`: convert each split to the fAIr layout (`chips/` georeferenced EPSG:3857 GeoTIFFs + `labels/labels.geojson`).
+- [ ] Recreate the `.venv` (`uv sync --extra test`), install `timm` (asked first), run the full test suite.
 
 ### Design notes
 - The ONNX graph takes fixed 256 px windows with a dynamic batch: the UPerNet pyramid pooling exports only for a

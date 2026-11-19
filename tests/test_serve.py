@@ -8,7 +8,6 @@ import pytest
 
 from conftest import CHIP_NAME, COARSE_NAME, FakeSession
 from ss_hot import postprocess_outputs, predict_session
-from ss_hot.evaluate import border_band
 from ss_hot.params import WINDOW_PX
 from ss_hot.serve import list_images
 
@@ -50,20 +49,13 @@ def test_the_serving_path_does_not_import_torch():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-def test_the_border_band_follows_the_window_edges():
-    band = border_band(256, 300, window=256, border_px=16)
-    assert band.sum() == 256 * 300 - 224 * (224 + 44 - 16)  # the second window column starts at 256
-    assert band[0, 100] and band[100, 255] and band[100, 256] and not band[100, 100] and not band[100, 280]
-
-
-def test_scores_through_a_session(mask_dataset):
+def test_scores_through_a_session(fair_dataset):
     from ss_hot.evaluate import best_threshold, score_session
 
-    images, masks, _ = mask_dataset
-    results = score_session(FakeSession(), images_dir=images, labels=masks, params={}, thresholds=(0.3, 0.5))
+    chips, labels, _ = fair_dataset
+    results = score_session(FakeSession(), images_dir=chips, labels=labels, params={}, thresholds=(0.3, 0.5))
     assert set(results) == {0.3, 0.5}
     metrics = results[0.5]
     assert metrics["tp"] == 0 and metrics["fn"] == 2 * 256 * 256 and metrics["iou"] == 0.0
-    assert {"border_iou", "border_f1", "centre_iou", "centre_f1"} <= set(metrics)
     assert best_threshold(results)[0] in (0.3, 0.5)
     assert np.isfinite(metrics["precision"])
