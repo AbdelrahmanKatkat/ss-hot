@@ -1,8 +1,9 @@
 """Entry point to `ss_hot.evaluate`: pixel precision / recall / F1 / IoU of an exported ONNX at several thresholds (CPU).
 
     python scripts/evaluate.py --onnx data/runs/upernet/seagrass_upernet.onnx \
-        --images F:/HOTOSM/seagrass/data/test/images --labels F:/HOTOSM/seagrass/data/test/masks \
-        --source-gsd-m 0.0092 --out data/runs/upernet/test_metrics.json
+        --images <split>/chips --labels <split>/labels/labels.geojson --out data/runs/upernet/val_metrics.json
+
+Run it on the validation chips to choose the serving threshold (the best F1 of the sweep), then on test.
 
 Needs `onnxruntime` (the `infer` extra); no torch.
 """
@@ -22,8 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--onnx", required=True, type=Path)
     parser.add_argument("--images", required=True, type=Path)
-    parser.add_argument("--labels", required=True, type=Path, help="mask folder or labels GeoJSON")
-    parser.add_argument("--source-gsd-m", type=float)
+    parser.add_argument("--labels", required=True, type=Path, help="labels GeoJSON (or a folder holding one)")
     parser.add_argument("--params", default="{}", help="JSON of PreprocessParams keys")
     parser.add_argument("--out", type=Path, help="write the metrics as JSON")
     args = parser.parse_args()
@@ -33,7 +33,7 @@ def main() -> None:
     session = ort.InferenceSession(str(args.onnx), providers=["CPUExecutionProvider"])
     results = score_session(
         session, images_dir=args.images, labels=args.labels, params=json.loads(args.params),
-        source_gsd_m=args.source_gsd_m, thresholds=DEFAULT_THRESHOLDS,
+        thresholds=DEFAULT_THRESHOLDS,
     )  # fmt: skip
     threshold, metrics = best_threshold(results)
     logging.getLogger("evaluate").info(

@@ -1,159 +1,138 @@
 # ss-hot research
 
-Five research agents worked in parallel with the build, one per topic. Each wrote a full report; this file collects
-their findings, what the library took from them, and what is still open. Numbers marked *(est.)* are estimates or
-proposals the agents could not measure; everything else they computed from the data or read from a source cited in
-the full report.
+State of the art for each part of a seagrass segmentation model on fAIr, from five research agents (2026-11-19).
+Each topic has its own report with the sources; this page gathers the findings and what they mean for `ss-hot`.
+Claims marked **[V]** in the reports were read in the source, **[?]** only second-hand.
 
-| Topic | Full report | Status in the code |
+| Topic | Report | Sources |
 |---|---|---|
-| Preprocessing | [preprocessing.md](preprocessing.md) | 3 cm, `MAX_SCALE` 5, raw images, ImageNet in-graph done; window 512 kept (reason below) |
-| Data | [data.md](data.md) | reader, `spatial_split`, ignore value done; validation set is an open decision |
-| Postprocessing | [postprocessing.md](postprocessing.md) | defaults, ring winding, `area_m2` done; cross-chip merge open |
-| Augmentation | [augmentation.md](augmentation.md) | preset in `TrainParams` done; histogram matching is phase 2 |
-| Model | [model.md](model.md) | recipe done; hand-written UPerNet head kept instead of smp (reason below) |
+| Datasets and data practice | [`data.md`](data.md) | 52 |
+| Preprocessing | [`preprocessing.md`](preprocessing.md) | 35 |
+| Augmentation | [`augmentation.md`](augmentation.md) | 43 |
+| Postprocessing | [`postprocessing.md`](postprocessing.md) | 57 |
+| Models | [`model.md`](model.md) | 35 |
 
----
+Setting the reports were asked about: RGB-only drone orthomosaics from OpenAerialMap, shallow tropical water
+(Timor-Leste), 256 px web-map tiles (training tiles zoom 24, about 0.92 cm per pixel), binary segmentation, ONNX on
+CPU, GeoJSON polygons for OpenStreetMap, weights and code that allow commercial use. (Update 2026-11-20:
+non-commercial licences are acceptable after all, so the licence findings below no longer rule anything out.)
 
-## 1. Preprocessing
+## 1. Datasets
 
-Findings:
-- Training chips are 0.923 cm/px (all 4,422 on the zoom-23 grid although named z22). The source OAM image is
-  1.128 cm/px (TiTiler `/cog/info`: 461.00 m over 40,852 px, UTM 51S), so the chips are slightly upsampled. fAIr's
-  finest 256 px chip, zoom 22, is 3.69 cm/px at −8.53°; zoom 20 is 14.8 cm, zoom 19 29.5 cm.
-- Shrinking the training chips to 3 cm loses only 3–5% of their variance; Pillow's bilinear resize smooths correctly
-  when shrinking (a fine checkerboard averages out instead of aliasing).
-- The display adjustment of `images_processed` reproduces bit for bit with Pillow 12.3.0, but its contrast pivots on
-  each chip's own mean and its sharpening works at source-pixel scale, so it would mean something different on serving
-  chips; it also clips up to 0.5% of pixels and does not separate seagrass consistently better.
-- Raw chips have a per-channel std of only 0.024–0.051; dataset statistics would bake a ~x5 gain from one image into
-  the model, and per-chip standardisation amplifies noise on plain sand or water.
+- **No public dataset matches our setting** (tropical, overhead, 1–3 cm, seagrass masks, open licence) except HOT's
+  own `hotosm/vhr-seagrass-segmentation` and `fAIr-guru-td-seagrass`.
+- **Closest outside set:** DTU `CoastalEcology/SeagrassMapper` (2025, CC BY 4.0): drone ~3 cm and aircraft ~12.5 cm
+  tiles with eelgrass masks, Denmark; RGB not confirmed. Useful as an outside test.
+- **Not usable commercially:** MagicBathyNet (CC BY-NC-SA, 533 annotated patches), DeepSeagrass and SeagrassFinder
+  (CC BY-NC-ND; underwater side views anyway).
+- **Unlabelled imagery for pre-training:** KAUST Red Sea reef orthomosaics (CC0); Great Barrier Reef drone maps
+  (CC BY 4.0, raw imagery unconfirmed); Seatizen Atlas (licence statements conflict).
+- **Weak labels / checks only:** Allen Coral Atlas (5 m), Digital Earth Pacific (10 m), both CC BY 4.0; UNEP-WCMC
+  needs permission for commercial use; OSM has 331 `seamark:type=seagrass` objects worldwide.
+- **Practice:** split by site or by imagery, not at random (random hold-outs overstated accuracy by up to 28% in one
+  drone study [?]); conservative "label only what you are sure of" annotation; point and image labels propagated
+  with superpixels or DINOv2 are an established weak-label route.
 
-Taken into the code:
-- `model_gsd_m` = **0.03 m** for training and serving; one Pillow float bilinear resize in both; ImageNet mean/std
-  (the timm values for this encoder) fixed inside the ONNX graph.
-- **`MAX_SCALE` = 5** (was 16): zoom 20 is accepted (x4.9), zoom 19 refused (x9.8); shrinking is not limited;
-  `max_input_px` 2048. `lowres_max` = 5 so the augmentation reaches the coarsest accepted zoom.
-- Train and serve on raw `images`; low contrast is left to the `stretch` augmentation, not a preprocessing step.
-- Masks: GeoJSON is rasterised straight onto the scaled grid; mask images are resized by area majority; padding and
-  missing neighbours are `IGNORE`. The effective scale (scaled size / chip size) maps predictions back.
+## 2. Preprocessing
 
-Not taken, and why:
-- **`WINDOW_PX` 256** (proposed so that a lone 157 px chip fills 38% of a window instead of 9%): the library joins
-  neighbouring chips into mosaics, so a 512 window holds 3 x 3 chips (471 px, ~85% filled) and gives the pyramid
-  pooling more context; a 256 window would hold one chip. Cost per ground area is the same.
-- **Ground resolution from the GeoTIFF georeferencing** (before the chip name): fAIr serving chips are named and
-  georeferenced consistently, and the prepared training chips have no georeferencing, so this would not change
-  anything today; `source_gsd_m` covers the training data. Worth adding if a dataset with wrong names but correct
-  georeferencing appears.
-- The z22-name-on-z23-grid problem cannot be detected in general (a z23 index below 2²² looks like a valid z22 tile);
-  the fix belongs in the data converter: rename to `-23` and write georeferencing from the manifest bounds. Optional:
-  stitch complete zoom-22 parent tiles into 1024 px chips (2,972 / 416 / 436 in train / validation / test).
+- Classic water corrections need what RGB drone tiles lack: Hedley deglinting needs near-infrared, the Lyzenga
+  depth-invariant index needs one substrate at several depths. No evidence that either helps a deep net on RGB.
+- Sun glint on RGB drone imagery is handled at capture (sun angle, wind, polarisers) or with learned glint masks
+  (66–81% of glint pixels found); removal appears to need several frames, so not on one served tile.
+- Underwater colour correction as preprocessing: mixed (hurt a detection benchmark, small gains on underwater
+  seagrass video); not tested for aerial seagrass.
+- **Normalise as the encoder was pre-trained** (ImageNet for ConvNeXt).
+- Camera, date and site differences: handle with augmentation or histogram matching, not fixed corrections.
+- **Train and serve at one ground resolution**; web-map tile resolution changes with latitude and a train/test
+  mismatch hurts (size of the effect from a synthetic urban benchmark).
+- **Tile borders:** larger inference windows, or 50% overlap with Gaussian/spline blending, reduce border artefacts
+  (about 4x the model runs).
+- No drone-scale evidence for extra input channels (RGB indices, depth).
 
-Deciding experiment *(not run)*: downsample the test chips to zoom 22 / 21 / 20 resolution and compare `model_gsd_m`
-0.02, 0.03 and 0.037.
+## 3. Augmentation
 
-## 2. Data ([data.md](data.md))
+- **No seagrass augmentation ablation exists**; every number is from another domain.
+- Flips and 90° rotations: universal baseline, about 0–0.3 mIoU on their own; 8-view test-time augmentation about
+  zero.
+- Brightness, contrast, gamma help marine imagery more than hue or saturation; no source gives a safe hue range for
+  seagrass.
+- **Histogram matching** is the best-tested fix for site and sensor shift (eelgrass UAV → aircraft, F1 0.52, 68% of
+  an oracle), but gains vary and it can hurt.
+- **Mixing** (CutMix, Copy-Paste, ClassMix) gives the largest single gains in remote sensing (+2 to +6 mIoU).
+- **Semi-supervised training** with unlabelled imagery and strong augmentation is the strongest lever (+7 to +17
+  points with few labels).
+- Untested: down-then-up resampling as preparation for coarser serving imagery; physical water simulation
+  (attenuation, turbidity, glint) for segmentation.
+- Licences: albumentations is MIT only up to 2.0.8 (successor AGPL/commercial); kornia, torchvision, TorchGeo are
+  permissive.
 
-Findings:
-- Provenance: HF `hotosm/vhr-seagrass-segmentation` (CC-BY-4.0 + ODbL), one OAM image, TM projects 55908–55911,
-  OSM `seamark:type=seagrass`. Local split (`F:\HOTOSM\seagrass\data`): train 3,434 / validation 490 / test 498, with
-  76 buffer chips; train is identical to HF, 17 HF validation chips moved into the val/test buffer.
-- Seagrass pixel share: train 59.3%, validation 14.0%, test 49.1%. Under-mapping is in the **eastern half of 55909**
-  only (west, train: 44.3% per chip; east, validation: 12.9%). 127 of the 132 empty train chips are also 55909.
-- Validation imagery has much lower contrast (per-channel std 0.024–0.033 vs 0.041–0.053 in train), so part of the
-  "empty" area may be sand or deeper water *(unverified)*.
-- Labelling style differs by team: 55908 traced small patches (median 0.48 m²), 55911 drew large blobs (median
-  2.98 m², 70% of its AOI covered vs 45% for 55908). Test is all 55908; 65% of train is 55910/55911.
-- Two chips drifted badly between the Aug-10 export and the Oct-15 build (`OAM-7123194-4393807`, `OAM-7123195-4393807`:
-  81% / 76% seagrass then, 0.2% / 0.4% now).
+## 4. Postprocessing
 
-Recommendations and what the library does:
-- Don't select checkpoints on the current validation set (it rewards under-prediction). Short term: take validation as
-  spatial blocks from train across all four projects (~10%, one-chip buffer) → **`dataset.spatial_split` added**; keep
-  the 490 chips as an audit set only. Long term: remap north-east 55909 in the Tasking Manager. Re-cutting along x is
-  rejected (moves under-mapped chips into test).
-- Support ignore = 255 in masks for training → **done** (mask values 0/1/255; padding and missing neighbours are 255).
-  Don't use ignore masking for evaluation.
-- No class weights or oversampling by default (seagrass is the majority class). Don't drop empty chips blindly.
-- External evaluation-only sets: SeagrassMapper (CC-BY-4.0) first; MagicBathyNet (CC BY-NC 4.0) internal only.
-- Reader accepts layout A (`images/` + `masks/`) and layout B (georeferenced chips + one GeoJSON) → **done**
-  (`dataset.LabelSource`); train on `images`, not `images_processed`.
+- No seagrass paper describes a probability-to-polygon pipeline; they report pixel or point metrics only.
+- **Threshold:** choose it on validation (F1-optimal sweep), do not assume 0.5; temperature scaling is the cheap
+  calibration.
+- **Tile borders are the main error source;** overlapping windows with Gaussian weighting is the common default. TTA
+  and DenseCRF give small or unclear gains for their CPU cost.
+- Vector chain: remove small regions, polygonise (rasterio/GDAL), topology-preserving simplification, optional
+  Chaikin smoothing. Do not square corners (a building-model default in fairpredictor).
+- Across tiles: fAIr-utilities stitches masks into one raster, then merges polygons within 0.6 m;
+  `shapely.coverage_simplify` keeps shared edges consistent.
+- Output: RFC 7946 (counter-clockwise outer rings), 6 decimals ≈ 10 cm; an OSM way holds at most 2,000 nodes; holes
+  need multipolygon relations; the documented tag is `seamark:type=seagrass` (`natural=seagrass` is unused).
+- Habitat-mapping minimum mapping units are coarse (0.1 ha in a Florida guide) next to drone digitising (~0.9 m).
 
-## 3. Postprocessing ([postprocessing.md](postprocessing.md))
+## 5. Models
 
-Label statistics (18,542 raw OSM polygon parts): median area 1.2 m² (p5 0.09, p95 11.6, max 192), median width
-0.74 m, median vertex spacing 0.25 m, only 5 holes; 26% of polygons touch a neighbour.
+- No benchmark matches our setting. Closest: Lian 2026 (UAV intertidal, 9-channel input): UPerNet + ConvNeXtV2-T
+  94.63% mIoU vs U-Net (same encoder) 90.13% and DeepLabV3+-R101 88.88%; no RGB-only result.
+- Other RGB drone seagrass studies: FPN beat U-Net (Chen & Sasaki 2021, IoU 0.85 [?]); U-Net ranked first of four
+  (Jeon 2021); DeepLab F1 0.81 (Tallam 2023).
+- Tiny CNNs and transformers are about equal on high-resolution aerial data (FLAIR-HUB, UPerNet head: ConvNeXtV2-T
+  62.7, MiT-B2 62.7, Swin-T 62.2).
+- Remote-sensing foundation models do not reliably beat a supervised U-Net (PANGAEA) and are mostly pre-trained at
+  10–30 m.
+- Licences: SegFormer/MiT weights are NVIDIA non-commercial; ConvNeXt V2 ImageNet weights are CC BY-NC; ConvNeXt v1
+  is Apache-2.0 / MIT. Non-commercial is acceptable for this project (2026-11-20), so ConvNeXt V2-T, the encoder of
+  the Lian 2026 result, is an option to try against v1.
+- ONNX: UPerNet's pyramid pooling with bins (1, 2, 3, 6) fails on an 8×8 map (256 px input); bins must divide it.
+- Shortlist: (1) UPerNet + ConvNeXt-Tiny v1 (current), (2) U-Net + ConvNeXt-T as the control, (3) DINOv3 ConvNeXt-T
+  backbone (licence needs review), (4) UPerNet + Swin-T, (5) SAM2-UNet (research only). Keep (1) if it beats the
+  U-Net control on held-out sites and its 256 px ONNX export matches PyTorch.
 
-Taken into `PostprocessParams` (model pixels at 3 cm):
+## 6. What this means for ss-hot
 
-| Key | Default | On the ground |
-|---|---|---|
-| `threshold` (alias `confidence_threshold`) | 0.5 until a sweep | — |
-| `open_px` | 1 | removes parts narrower than 9 cm |
-| `close_px` | 2 | fills gaps narrower than 15 cm |
-| `min_area_px` | 278 | 0.25 m² (drops 16% of labelled polygons but 0.7% of their area; 1 m² would drop 45%) |
-| `fill_holes_px` | 278 | 0.25 m² |
-| `simplify_px` | 2 | 6 cm |
+The model stays UPerNet + ConvNeXt-Tiny v1. Applied on 2026-11-20 (see `progress.md`):
 
-Also done: RFC 7946 ring winding (exterior counter-clockwise, holes clockwise), geodesic `area_m2` per feature, empty
-prediction → empty FeatureCollection.
+**Forced by the dataset fix (256 px zoom-24 tiles, correct names):**
+- The model takes 256 px tiles as they are; the ONNX input is 256 px. Our pooling bins (1, 2, 4, 8) divide the 8×8
+  map, which avoids the export failure in §5.
+- `model_gsd_m` is the training resolution (0.0092 m); a tile within 2% of it is not resampled. `source_gsd_m` is
+  gone.
+- Chip joining, 512 px windows and the 255 ignore value are gone: one tile is one sample, masks are 0/1. A scaled
+  tile larger than 256 px is cropped at random for training; a smaller one is mirrored, image and mask together.
+- Tile bounds come from the `OAM-x-y-z` name when a file has no georeferencing (GeoJSON labels and output).
+- Postprocess sizes are in m² / m (`min_area_m2`, `fill_holes_m2`, `simplify_m`, `open_m`, `close_m`), turned into
+  model pixels with `model_gsd_m`; decoding itself stays in pixels.
+- Removed: `MAX_INPUT_PX`, `smooth_sigma_px` (Gaussian smoothing of the probability before the threshold; off by
+  default and no source supports it), the "mirror" orientation. Kept on request: `freeze_encoder`, `unfreeze_from`,
+  `encoder_lr_factor`, `epoch_fraction`.
 
-Open:
-- **Merge polygons across chip borders.** The platform (`fAIr/backend/predictions/post_run.py`) and ts-hot do not;
-  label polygons cross a 256 px tile edge 1.6% / 4.5% / 8.5% of the time at z19 / z20 / z21 (4.9% / 10.6% / 19.3% of
-  the area). The agent recommends merging edge-touching polygons in the library (`merge_chips`, `merge_distance_m`
-  0.05 *(est.)*), which needs `shapely` in the core dependencies (probably already in the serving image via
-  `fair-py-ops[serve]` *(unverified)*). Not implemented yet: a new dependency needs a decision.
-- Threshold: tune on a cleaned validation subset or held-out train blocks, never on test; pick the middle of the F1
-  plateau of a 0.2–0.8 sweep (`evaluate.score_*` with `DEFAULT_THRESHOLDS`, `best_threshold`).
+**Serving zoom (answered):** fAIr recommends a zoom for seagrass (the training zoom 24), but users can send coarser
+tiles. Those are upscaled once to 0.92 cm (zoom 23 x 2, zoom 22 x 4; zoom 21 and coarser are refused, `MAX_SCALE`
+5), so `lowres` stays in training (probability 0.3, factor up to 5).
 
-## 4. Augmentation ([augmentation.md](augmentation.md))
+**From the research:**
+- Augmentation: quarter turns and mirrors, brightness/contrast/gamma, blur/JPEG, zoom-in jitter (1 to 1.25), and two
+  new steps against a second random training tile: randomised histogram matching (probability 0.3) and CutMix
+  (probability 0.5). `water_tint` and the contrast/saturation stretch are gone. The probabilities are starting values,
+  not tuned.
+- The training run ends with an F1 threshold sweep on validation (`history.json`); serve with that threshold.
+- Evaluation reports IoU / F1 for the 16 px band along each window edge and for the centre, to measure tile-edge
+  error.
+- A U-Net + ConvNeXt-T control (`decoder: "unet"`), trained the same way, to justify UPerNet.
+- The README states that the test split shares imagery with training; an outside test (SeagrassMapper) needs a
+  download.
 
-Findings: the raw image is hazy and nearly grey (saturation ≈ 0.03); seagrass is only 3–12 DN darker and slightly bluer
-than sand; held-out areas have about half the contrast of training areas. A round trip down-and-up loses 30% of the
-texture at 7.4 cm and 46% at 15 cm, so ts-hot's blur is far too mild for the serving gap.
-
-Taken into the code (`AugmentParams` stays the identity; the seagrass preset is the `TrainParams` default):
-
-| Step | Key | Preset |
-|---|---|---|
-| quarter turns + mirror | `orientation` | `dihedral` |
-| brightness / contrast / gamma | `photometric` | 0.2 |
-| contrast and saturation x exp(±s) (x0.5–x2) | `stretch` | 0.7 |
-| blend toward blue-green water, red fading most | `water_tint` | 0.3 |
-| resize ±, crop or pad with ignore | `scale_jitter` | 0.25 |
-| blur or JPEG | `degrade_prob` | 0.3 |
-| down by 1–`lowres_max` and back up | `lowres_prob`, `lowres_max` | 0.5, 4.0 |
-
-Not done, by recommendation: hue rotation (can flip the darker/bluer vs brighter/yellower cue), CutMix/Mosaic (labels
-have coarse block borders), arbitrary rotations or elastic warps, any augmentation of validation/test/serving, test-time
-augmentation (8 passes on CPU). Phase 2: histogram matching to unlabelled chips from other OAM images (needs that
-imagery, which needs your OK). Evaluation plan: 3 seeds per added step, plus a fixed-seed shift suite on test.
-
-## 5. Model ([model.md](model.md))
-
-Findings:
-- Versions on PyPI (2026-11-19): timm 1.0.31 (Apache-2.0), torch 2.15.0, onnx 1.23.2, onnxruntime 1.32.0,
-  segmentation-models-pytorch 0.6.0 (MIT). ConvNeXt v1 `fb_in22k_ft_in1k` weights are Apache-2.0; ConvNeXt-V2 ImageNet
-  weights are CC-BY-NC-4.0 and excluded.
-- smp's UPerNet accepts `tu-convnext_tiny.fb_in22k_ft_in1k`, but its pyramid pooling bins are hard-coded to (1, 2, 3, 6),
-  and the legacy ONNX exporter only exports adaptive pooling when the bins divide the static feature size (16 x 16 for a
-  512 window); 3 and 6 fail (confirmed in the torch 2.15 source). smp's fix (PR #1270) covers PSPNet only.
-- Size *(est.)*: about 37 M parameters and ~150 GFLOPs at 512² with a 256-channel decoder; ONNX about 150 MB; CPU
-  onnxruntime 0.8–1.5 s per 512 window *(not measured)*. GPU memory with AMP at 512: batch 8 ≈ 8–10 GB *(est.)*.
-
-Decisions in the code:
-- **Hand-written UPerNet head on a timm ConvNeXt-Tiny feature extractor** (`model.py`, ~100 lines) instead of smp: it
-  exports with pooling bins (1, 2, 4, 8) without patching smp internals, and keeps smp out of the dependencies. The
-  agent preferred smp because it would also build the U-Net-ResNet34 baseline; if that baseline is wanted, smp can be
-  added to the `train` extra then. The 1 x 1 pooling branch has no BatchNorm (a batch of one would fail otherwise).
-- ONNX: fixed 512 px windows, dynamic batch, opset 17, legacy exporter (`dynamo=False`), parity test < 1e-4.
-- Recipe (ConvNeXt / mmseg, adapted to 3,434 chips): AdamW lr 1e-4, weight decay 0.05 (none on 1-D parameters),
-  stage-wise layer decay 0.9 (`layer_decay`; stage i x 0.9^(4−i), stem x 0.9^5 — mmseg's exact exponents differ by a
-  constant factor at most, *unverified*), warmup 400 steps then cosine, gradient clipping 1.0, drop path 0.1, AMP
-  (bf16, else fp16 with a gradient scaler), channels-last, 40 epochs, patience 8, monitor validation IoU, no freezing.
-- Loss: BCE + Dice over non-ignored pixels; no focal loss (seagrass is the majority); Lovasz only as a later stage.
-
-Still unverified (from the agent): the 4–6 mIoU margin of UPerNet-ConvNeXt over U-Net/DeepLabV3+ (abstract only, and
-that study used multispectral bands); pinning the pretrained weights to a Hugging Face commit; real CPU latency.
+**Later:** overlapping-window serving across neighbouring tiles (if the border metric shows it matters);
+semi-supervised training on unlabelled drone imagery; merging polygons across tiles (shapely); ConvNeXt V2-T as the
+next encoder to try (its licence is acceptable now).

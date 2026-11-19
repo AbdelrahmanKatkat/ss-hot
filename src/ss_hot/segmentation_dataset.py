@@ -1,8 +1,10 @@
-"""Chips + labels as torch datasets of fixed-size windows (needs the `train` extra; import explicitly).
+"""Tiles + labels as torch datasets (needs the `train` extra; import explicitly).
 
-Both datasets scale every chip as at serving time and join neighbouring chips into mosaic blocks
-(`dataset.dataset_blocks`). `TrainWindows` gives one random window per block per epoch, augmented; `EvalWindows`
-gives every window of a block, unchanged, stacked (use `batch_size=1`).
+Both datasets scale every tile as at serving time (`dataset.scale_pair`; a tile at the training zoom is not
+resampled). `TrainTiles` gives one `window` x `window` sample per tile and epoch, augmented, with a second random tile
+as the partner for CutMix and histogram matching. `EvalTiles` gives each tile cut into windows exactly as at serving
+(`preprocess.to_windows`) and its full mask, so predictions are stitched and scored like served ones (use
+`batch_size=1`).
 """
 
 from collections.abc import Sequence
@@ -12,11 +14,12 @@ import numpy as np
 import torch
 
 from .augment import augment_chip_and_mask
-from .dataset import LabelSource, assemble_block, dataset_blocks, fit_window, grid_windows, load_label_source
+from .dataset import LabelSource, fit_tile, list_chip_paths, load_label_source, scale_pair
 from .params import WINDOW_PX, AugmentParams, PreprocessParams
+from .preprocess import to_windows
 
 
-class _BlockDataset(torch.utils.data.Dataset):
+class _TileDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         images_dir: str | Path,
@@ -24,33 +27,23 @@ class _BlockDataset(torch.utils.data.Dataset):
         pre: PreprocessParams,
         *,
         names: Sequence[str] | None = None,
-        source_gsd_m: float | None = None,
         window: int = WINDOW_PX,
     ) -> None:
-        self.images_dir, self.pre, self.window, self.source_gsd_m = (
-            Path(images_dir),
-            pre,
-            window,
-            source_gsd_m,
-        )
+        self.paths = list_chip_paths(images_dir, names)
+        if not self.paths:
+            raise ValueError(f"No tiles found in {images_dir}")
         self.labels = load_label_source(labels)
-        self.blocks = dataset_blocks(images_dir, pre, names=names, source_gsd_m=source_gsd_m, window=window)
+        self.pre, self.window = pre, window
 
     def __len__(self) -> int:
-        return len(self.blocks)
+        return len(self.paths)
 
-    def _block(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
-        return assemble_block(
-            self.blocks[idx], self.images_dir, self.labels, self.pre, source_gsd_m=self.source_gsd_m
-        )
-
-    @property
-    def chip_count(self) -> int:
-        return sum(len(block) for block in self.blocks)
+    def _pair(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
+        return scale_pair(self.paths[idx], self.labels, self.pre)
 
 
-class TrainWindows(_BlockDataset):
-    """One `window` x `window` training sample per block: a random crop (or padding) of the mosaic, augmented."""
+class TrainTiles(_TileDataset):
+    """One `window` x `window` training sample per tile (a random crop of a larger scaled tile), augmented."""
 
     def __init__(self, *args, augment: AugmentParams | None = None, seed: int = 0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -62,19 +55,25 @@ class TrainWindows(_BlockDataset):
         """Change the random crops and augmentation from epoch to epoch while staying reproducible."""
         self.epoch = epoch
 
+    def _needs_partner(self) -> bool:
+        return self.augment is not None and (self.augment.cutmix_prob > 0 or self.augment.histogram_prob > 0)
+
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         rng = np.random.default_rng((self.seed, self.epoch, idx))
-        image, mask = fit_window(*self._block(idx), self.window, rng)
+        image, mask = fit_tile(*self._pair(idx), self.window, rng)
         if self.augment is not None:
-            image, mask = augment_chip_and_mask(image, mask, rng, self.augment)
+            partner = None
+            if self._needs_partner() and len(self) > 1:
+                other = int(rng.integers(0, len(self) - 1))
+                partner = fit_tile(*self._pair(other + (other >= idx)), self.window, rng)
+            image, mask = augment_chip_and_mask(image, mask, rng, self.augment, partner)
         return torch.from_numpy(image), torch.from_numpy(mask)
 
 
-class EvalWindows(_BlockDataset):
-    """Every `window` x `window` piece of one block, stacked: `(K, 3, w, w)` images and `(K, w, w)` masks."""
+class EvalTiles(_TileDataset):
+    """One tile as served: `(K, 3, w, w)` windows and its `(H, W)` mask at the model resolution."""
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        pieces = grid_windows(*self._block(idx), self.window)
-        images = np.stack([image for image, _ in pieces])
-        masks = np.stack([mask for _, mask in pieces])
-        return torch.from_numpy(images), torch.from_numpy(masks)
+        image, mask = self._pair(idx)
+        windows, _, _ = to_windows(image, self.window)
+        return torch.from_numpy(windows), torch.from_numpy(mask)

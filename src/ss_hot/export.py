@@ -2,8 +2,8 @@
 
 The exported graph is the contract the serving side reads:
 
-    input  `image`        (N, 3, 512, 512) float32 in [0, 1], RGB windows cut by `preprocess.to_windows`
-    output `probability`  (N, 512, 512) float32 in [0, 1], the seagrass probability of every pixel
+    input  `image`        (N, 3, 256, 256) float32 in [0, 1], RGB windows cut by `preprocess.to_windows`
+    output `probability`  (N, 256, 256) float32 in [0, 1], the seagrass probability of every pixel
 
 The batch axis is dynamic; the window size is fixed (`params.WINDOW_PX`) because the pyramid pooling exports only for
 a static spatial size. ImageNet normalisation, the network and the sigmoid are inside the graph; the threshold and

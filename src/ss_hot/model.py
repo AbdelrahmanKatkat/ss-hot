@@ -6,8 +6,8 @@ Apache-2.0), used as a feature extractor of its four stages (strides 4, 8, 16, 3
 stride 4. The model takes RGB in [0, 1] and returns one seagrass logit per pixel at the input size; the ImageNet
 normalisation happens inside, so training and serving cannot disagree about it.
 
-The pooling scales are (1, 2, 4, 8) instead of the usual (1, 2, 3, 6): on a 512 px window the deepest stage is
-16 x 16, and only scales that divide it export to ONNX as plain average pooling.
+The pooling scales are (1, 2, 4, 8) instead of the usual (1, 2, 3, 6): on a 256 px window the deepest stage is 8 x 8,
+and only scales that divide it export to ONNX as plain average pooling.
 """
 
 import torch
@@ -65,6 +65,7 @@ class UPerHead(nn.Module):
         self.lateral = nn.ModuleList(ConvBNReLU(c, channels) for c in in_channels[:-1])
         self.smooth = nn.ModuleList(ConvBNReLU(channels, channels, kernel_size=3) for _ in in_channels[:-1])
         self.fuse = ConvBNReLU(len(in_channels) * channels, channels, kernel_size=3)
+        self.out_channels = channels
 
     def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
         levels = [lateral(feature) for lateral, feature in zip(self.lateral, features[:-1])]
@@ -99,7 +100,7 @@ class SeagrassUPerNet(nn.Module):
         )  # fmt: skip
         self.decoder = UPerHead(list(self.encoder.feature_info.channels()))
         self.dropout = nn.Dropout2d(0.1)
-        self.head = nn.Conv2d(DECODER_CHANNELS, 1, kernel_size=1)
+        self.head = nn.Conv2d(self.decoder.out_channels, 1, kernel_size=1)
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         features = self.encoder((image - self.mean) / self.std)

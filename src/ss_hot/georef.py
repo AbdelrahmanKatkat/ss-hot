@@ -24,7 +24,7 @@ def polygons_to_chip_pixels(polygons: list[dict[str, Any]], meta: PreprocessMeta
 def ring_to_epsg4326(ring: np.ndarray, transform: Any, crs: Any) -> list[list[float]]:
     """One chip-pixel ring -> closed EPSG:4326 ring `[[lon, lat], ...]`.
 
-    A chip without a CRS (PNG, JPEG) has no map position: its ring is returned in the chip's own coordinates.
+    A chip without a CRS has no map position: its ring is returned in the chip's own coordinates.
     """
     # Explicit affine maths: works across `affine` versions (`*` is deprecated, `@` needs affine>=3).
     cols, rows = ring[:, 0], ring[:, 1]

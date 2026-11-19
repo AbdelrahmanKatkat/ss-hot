@@ -1,8 +1,8 @@
 """`ss-hot`: HOT fAIr seagrass semantic segmentation helpers (UPerNet on a ConvNeXt-Tiny encoder)."""
 
 from .augment import augment_chip_and_mask
-from .dataset import BACKGROUND, IGNORE, SEAGRASS, LabelSource, scale_pair
-from .decode import decode_polygons
+from .dataset import BACKGROUND, SEAGRASS, LabelSource, scale_pair
+from .decode import DecodeParams, decode_polygons
 from .params import (
     AugmentParams,
     PostprocessParams,
@@ -13,7 +13,7 @@ from .params import (
     parse_preprocess_params,
     parse_train_params,
 )
-from .postprocess import polygons_to_feature_collection, postprocess_outputs
+from .postprocess import decode_params, polygons_to_feature_collection, postprocess_outputs
 from .preprocess import PreprocessMeta, preprocess_chip, preprocess_rgb, stitch_windows
 from .serve import predict_chip, predict_session
 from .tiles import chip_scale, tile_gsd_m
@@ -35,7 +35,6 @@ __all__ = [
     "scale_pair",
     "BACKGROUND",
     "SEAGRASS",
-    "IGNORE",
     # training-time augmentation (every step is off by default)
     "augment_chip_and_mask",
     # preprocess -> decode -> postprocess
@@ -43,6 +42,8 @@ __all__ = [
     "preprocess_rgb",
     "preprocess_chip",
     "stitch_windows",
+    "DecodeParams",
+    "decode_params",
     "decode_polygons",
     "polygons_to_feature_collection",
     "postprocess_outputs",

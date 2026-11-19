@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from ss_hot.decode import (
+    DecodeParams,
     _polygon_area,
     decode_polygons,
     polygon_confidence,
@@ -9,7 +10,6 @@ from ss_hot.decode import (
     threshold_mask,
     trace_polygons,
 )
-from ss_hot.params import PostprocessParams
 
 
 def _square(top: int, left: int, side: int, value: float = 1.0, shape=(64, 64)) -> np.ndarray:
@@ -72,11 +72,9 @@ def test_a_square_keeps_its_corners_and_a_sliver_collapses():
 
 def test_small_polygons_are_dropped_and_the_large_one_is_kept():
     probability = np.maximum(_square(5, 5, 30), _square(50, 50, 5))  # 900 px and 25 px
-    polygons = decode_polygons(
-        probability, PostprocessParams(min_area_px=400, simplify_px=1.0, open_px=0, close_px=0)
-    )
+    polygons = decode_polygons(probability, DecodeParams(min_area_px=400, simplify_px=1.0))
     assert len(polygons) == 1 and _polygon_area(polygons[0]["rings"]) == pytest.approx(900)
-    assert len(decode_polygons(probability, PostprocessParams(min_area_px=0, open_px=0, close_px=0))) == 2
+    assert len(decode_polygons(probability, DecodeParams())) == 2
 
 
 def test_empty_and_missing_parameters_give_safe_defaults():

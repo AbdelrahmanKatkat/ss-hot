@@ -1,47 +1,39 @@
 """ONNX probability map -> polygons in model-input pixels (no CRS / affine dependence).
 
-The exported graph already did the network and the sigmoid. What is left, and stays tunable, is an optional smoothing
-of the probability, the threshold, an optional opening / closing of the mask, the tracing of the pixel edges, the minimum
-area, the filling of small holes and the simplification (`PostprocessParams`).
+The exported graph already did the network and the sigmoid. What is left, and stays tunable, is the threshold, an
+optional opening / closing of the mask, the tracing of the pixel edges, the minimum area, the filling of small holes
+and the simplification (`DecodeParams`, in model pixels; `postprocess.py` converts the ground-unit
+`PostprocessParams` to it).
 
 A polygon is a dict `{"rings", "confidence", "class_id"}`: `rings` is a list of `(N, 2)` arrays of `(col, row)` vertices,
 the exterior first and then its holes, each with its first vertex repeated at the end; `confidence` is the mean seagrass
-probability over the polygon's pixels. In order of use: `smooth_probability`, `threshold_mask`, `open_mask`,
-`close_mask`, `trace_polygons`, `simplify_ring`, `polygon_confidence`, `decode_polygons`.
+probability over the polygon's pixels. In order of use: `threshold_mask`, `open_mask`, `close_mask`, `trace_polygons`, `simplify_ring`, `polygon_confidence`, `decode_polygons`.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from rasterio.features import rasterize, shapes
 
-from .params import PostprocessParams
-
 CLASS_ID = 1  # seagrass
+
+
+@dataclass(frozen=True)
+class DecodeParams:
+    """The decoding steps in model pixels (no ground units here); `postprocess.decode_params` builds it."""
+
+    threshold: float = 0.5
+    min_area_px: float = 0.0  # polygons smaller than this many pixels are dropped
+    fill_holes_px: float = 0.0  # interior holes smaller than this many pixels are filled
+    simplify_px: float = 0.0  # Douglas-Peucker tolerance (0 keeps every pixel edge)
+    open_px: int = 0  # square opening radius
+    close_px: int = 0  # square closing radius
 
 
 def threshold_mask(probability: np.ndarray, threshold: float) -> np.ndarray:
     """`(H, W)` probability -> `(H, W)` `uint8` mask, 1 where the probability reaches `threshold`."""
     return (probability >= threshold).astype(np.uint8)
-
-
-def smooth_probability(probability: np.ndarray, sigma: float) -> np.ndarray:
-    """Gaussian smoothing of a `(H, W)` probability (separable, edges repeated); `sigma` 0 returns it unchanged."""
-    if sigma <= 0:
-        return probability
-    radius = max(1, int(np.ceil(3 * sigma)))
-    offsets = np.arange(-radius, radius + 1)
-    kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
-    kernel /= kernel.sum()
-    smoothed = probability.astype(np.float32)
-    for axis in (0, 1):
-        padded = np.pad(smoothed, [(radius, radius) if a == axis else (0, 0) for a in (0, 1)], mode="edge")
-        size = smoothed.shape[axis]
-        smoothed = sum(
-            weight * np.take(padded, np.arange(shift, shift + size), axis=axis)
-            for weight, shift in zip(kernel, range(2 * radius + 1))
-        ).astype(np.float32)
-    return smoothed
 
 
 def _slide(mask: np.ndarray, radius: int, take_max: bool) -> np.ndarray:
@@ -159,7 +151,7 @@ def polygon_confidence(probability: np.ndarray, rings: list[np.ndarray]) -> floa
     return float(window[inside].mean()) if inside.any() else float(window.max())
 
 
-def decode_polygons(probability: Any, cfg: PostprocessParams | None = None) -> list[dict[str, Any]]:
+def decode_polygons(probability: Any, cfg: DecodeParams | None = None) -> list[dict[str, Any]]:
     """Mirror of the tail of the serving path for one chip.
 
     Args:
@@ -167,8 +159,8 @@ def decode_polygons(probability: Any, cfg: PostprocessParams | None = None) -> l
     Returns:
         Polygons as dicts `rings, confidence, class_id`, in model-input pixels, those under `min_area_px` dropped.
     """
-    cfg = cfg or PostprocessParams()
-    probability = smooth_probability(np.asarray(probability, dtype=np.float32), cfg.smooth_sigma_px)
+    cfg = cfg or DecodeParams()
+    probability = np.asarray(probability, dtype=np.float32)
     mask = close_mask(open_mask(threshold_mask(probability, cfg.threshold), cfg.open_px), cfg.close_px)
     polygons = []
     for rings in trace_polygons(mask):

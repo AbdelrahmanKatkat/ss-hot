@@ -1,8 +1,8 @@
 """Postprocess: the model output (seagrass probability per chip) -> polygons -> GeoJSON FeatureCollection.
 
 `postprocess_outputs` is the ready-to-use step a pack's `postprocess` calls on what `predict_session` returned: it decodes
-each probability (stage 3, `inference.*` decoding keys) and georeferences the polygons (stage 4). Inference itself
-(`serve.py`) does neither.
+each probability (stage 3, `PostprocessParams` keys, sizes in metres turned into model pixels with `model_gsd_m`) and
+georeferences the polygons (stage 4). Inference itself (`serve.py`) does neither.
 """
 
 from pathlib import Path
@@ -11,9 +11,9 @@ from typing import Any
 import numpy as np
 from pyproj import Geod
 
-from .decode import decode_polygons
+from .decode import DecodeParams, decode_polygons
 from .georef import polygons_to_chip_pixels, ring_to_epsg4326
-from .params import parse_postprocess_params
+from .params import PostprocessParams, parse_postprocess_params, parse_preprocess_params
 from .preprocess import PreprocessMeta
 
 CLASS_NAMES = {1: "seagrass"}
@@ -41,6 +41,15 @@ def geodesic_area_m2(rings: list[list[list[float]]]) -> float:
     return abs(_GEOD.polygon_area_perimeter(*zip(*exterior))[0]) - sum(
         abs(_GEOD.polygon_area_perimeter(*zip(*hole))[0]) for hole in holes
     )
+
+
+def decode_params(cfg: PostprocessParams, model_gsd_m: float) -> DecodeParams:
+    """Ground-unit postprocess sizes -> model pixels (each model pixel covers `model_gsd_m` metres)."""
+    return DecodeParams(
+        threshold=cfg.threshold, min_area_px=cfg.min_area_m2 / model_gsd_m**2,
+        fill_holes_px=cfg.fill_holes_m2 / model_gsd_m**2, simplify_px=cfg.simplify_m / model_gsd_m,
+        open_px=round(cfg.open_m / model_gsd_m), close_px=round(cfg.close_m / model_gsd_m),
+    )  # fmt: skip
 
 
 def polygons_to_feature_collection(
@@ -74,8 +83,8 @@ def polygons_to_feature_collection(
 def postprocess_outputs(
     outputs: list[tuple[Path, np.ndarray, PreprocessMeta]], params: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """`predict_session` output -> one EPSG:4326 FeatureCollection with the features of every chip."""
-    cfg = parse_postprocess_params(params)
+    """`predict_session` output -> one EPSG:4326 FeatureCollection with the features of every tile."""
+    cfg = decode_params(parse_postprocess_params(params), parse_preprocess_params(params).model_gsd_m)
     features: list[dict[str, Any]] = []
     for path, probability, meta in outputs:
         polygons = polygons_to_chip_pixels(decode_polygons(probability, cfg), meta)

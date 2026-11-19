@@ -1,9 +1,10 @@
 """Fine-tuning of the seagrass UPerNet (needs the `train` extra; import explicitly, not from `ss_hot`).
 
 Recipe (see docs/research.md, model): AdamW with no weight decay on norms and biases, a linear warmup then cosine
-decay stepped per batch, gradient clipping, mixed precision on CUDA, binary cross-entropy plus Dice over the pixels
-that are not `IGNORE`, and the best epoch by the monitored value (validation loss or IoU) kept. ConvNeXt has no
-BatchNorm, so nothing has to stay in eval mode while training.
+decay stepped per batch, gradient clipping, mixed precision on CUDA, binary cross-entropy plus Dice, and the best epoch
+by the monitored value (validation loss or IoU) kept. Validation chips are predicted window by window and stitched, as
+at serving. ConvNeXt has no BatchNorm, so nothing has to stay in eval mode while training. The serving threshold is
+chosen afterwards with a sweep on validation (`evaluate.py`).
 """
 
 import logging
@@ -19,11 +20,11 @@ import numpy as np
 import torch
 import torch.nn.functional as functional
 
-from .dataset import IGNORE, SEAGRASS, LabelSource
+from .dataset import SEAGRASS, LabelSource
 from .export import build_model
 from .model import encoder_stage_modules
 from .params import ENCODER_STAGES, PreprocessParams, TrainParams
-from .segmentation_dataset import EvalWindows, TrainWindows
+from .segmentation_dataset import EvalTiles, TrainTiles
 
 log = logging.getLogger(__name__)
 
@@ -121,18 +122,22 @@ def lr_schedule(optimizer: Any, total_steps: int, warmup_steps: int, cosine: boo
 
 
 def loss_parts(logits: torch.Tensor, mask: torch.Tensor) -> dict[str, torch.Tensor]:
-    """Binary cross-entropy and Dice loss of `(B, 1, H, W)` logits against a `(B, H, W)` mask, ignoring `IGNORE`."""
-    valid = (mask != IGNORE).float()
+    """Binary cross-entropy and Dice loss of `(B, 1, H, W)` logits against a `(B, H, W)` 0/1 mask."""
     target = (mask == SEAGRASS).float()
     logits = logits[:, 0].float()
-    bce = (functional.binary_cross_entropy_with_logits(logits, target, reduction="none") * valid).sum()
-    bce = bce / valid.sum().clamp(min=1.0)
-    probability = torch.sigmoid(logits) * valid
+    bce = functional.binary_cross_entropy_with_logits(logits, target)
+    probability = torch.sigmoid(logits)
     overlap = (probability * target).sum()
-    dice = 1.0 - (2.0 * overlap + DICE_SMOOTHING) / (
-        probability.sum() + (target * valid).sum() + DICE_SMOOTHING
-    )
+    dice = 1.0 - (2.0 * overlap + DICE_SMOOTHING) / (probability.sum() + target.sum() + DICE_SMOOTHING)
     return {"bce": bce, "dice": dice}
+
+
+def stitch_logits(logits: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """`(rows * cols, 1, w, w)` window logits -> `(1, 1, height, width)`, the tile they cover (padding cut)."""
+    window = logits.shape[-1]
+    rows, cols = -(-height // window), -(-width // window)
+    full = logits[:, 0].reshape(rows, cols, window, window).permute(0, 2, 1, 3)
+    return full.reshape(rows * window, cols * window)[:height, :width][None, None]
 
 
 def _hms(seconds: float) -> str:
@@ -183,21 +188,20 @@ def _train_epoch(
 
 @torch.no_grad()
 def _evaluate_epoch(model, loader, device, cfg: TrainParams, threshold: float = 0.5) -> dict[str, float]:
-    """Mean loss and the IoU / F1 of the seagrass class at `threshold` over every validation window."""
+    """Mean loss and the IoU / F1 of the seagrass class at `threshold` over every validation tile (stitched)."""
     model.eval()
     losses: list[float] = []
     tp = fp = fn = 0
-    for images, masks in loader:
-        images, masks = images.flatten(0, 1).to(device), masks.flatten(0, 1).to(device)
+    for windows, masks in loader:
+        windows, masks = windows[0].to(device), masks.to(device)
         with _autocast(device, cfg.amp):
-            logits = model(images)
+            logits = stitch_logits(model(windows).float(), *masks.shape[-2:])
         parts = loss_parts(logits, masks)
         losses.append(float((parts["bce"] + cfg.dice_weight * parts["dice"]).cpu()))
-        predicted = torch.sigmoid(logits[:, 0].float()) >= threshold
-        valid = masks != IGNORE
-        truth = (masks == SEAGRASS) & valid
+        predicted = torch.sigmoid(logits[:, 0]) >= threshold
+        truth = masks == SEAGRASS
         tp += int((predicted & truth).sum())
-        fp += int((predicted & ~truth & valid).sum())
+        fp += int((predicted & ~truth).sum())
         fn += int((~predicted & truth).sum())
     iou = tp / (tp + fp + fn) if (tp + fp + fn) else 0.0
     f1 = 2 * tp / (2 * tp + fp + fn) if (tp + fp + fn) else 0.0
@@ -214,7 +218,6 @@ def train(
     pre: PreprocessParams | None = None,
     checkpoint: str | Path | BinaryIO | None = None,
     pretrained: bool = True,
-    source_gsd_m: float | None = None,
     train_names: Sequence[str] | None = None,
     val_names: Sequence[str] | None = None,
     log_every: int = 0,
@@ -222,12 +225,11 @@ def train(
     on_epoch_end: EpochCallback | None = None,
     epoch_checkpoint_dir: str | Path | None = None,
 ) -> TrainResult:
-    """Fine-tune the seagrass UPerNet on chips and labels; keep the best epoch.
+    """Fine-tune the seagrass UPerNet on chips and their labels GeoJSON; keep the best epoch.
 
     Start from ImageNet encoder weights (`pretrained`, downloaded by timm on first use) or continue a saved model
-    (`checkpoint`, a `SeagrassUPerNet` state dict path or binary stream). Labels are a mask folder or a GeoJSON
-    (`dataset.LabelSource`); `source_gsd_m` overrides the ground resolution a chip name implies (for datasets whose
-    names do not match their footprint). `pre.model_gsd_m` must be the value used at serving time.
+    (`checkpoint`, a `SeagrassUPerNet` state dict path or binary stream). `pre.model_gsd_m` must be the value used at
+    serving time.
 
     Progress goes to the `ss_hot.train` logger at INFO (visible even if the host configured nothing): a start summary,
     about 50 step lines per epoch, and one line per epoch. `on_epoch_end(epoch, metrics)` lets a pipeline step forward
@@ -240,13 +242,12 @@ def train(
         log.warning("training on CPU: expect it to be slow; fAIr training is meant to run on a GPU")
     torch.manual_seed(cfg.seed)
 
-    train_ds = TrainWindows(
-        train_images_dir, train_labels, pre, names=train_names, source_gsd_m=source_gsd_m,
-        augment=cfg.augment, seed=cfg.seed,
-    )  # fmt: skip
+    train_ds = TrainTiles(
+        train_images_dir, train_labels, pre, names=train_names, augment=cfg.augment, seed=cfg.seed
+    )
     val_loader = None
     if val_images_dir is not None and val_labels is not None:
-        val_ds = EvalWindows(val_images_dir, val_labels, pre, names=val_names, source_gsd_m=source_gsd_m)
+        val_ds = EvalTiles(val_images_dir, val_labels, pre, names=val_names)
         val_loader = torch.utils.data.DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=num_workers)
     else:
         log.warning("no validation set: the best epoch is chosen by training loss")
@@ -266,13 +267,14 @@ def train(
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
     log.info(
-        "start: device=%s train_chips=%d blocks=%d val_blocks=%s batch_size=%d steps/epoch=%d epochs=%d lr=%g "
-        "weight_decay=%g warmup=%d encoder_lr_factor=%g layer_decay=%g freeze_encoder=%s unfreeze_from=%s drop_path=%g amp=%s "
-        "monitor=%s params=%.1fM trainable=%.1fM model_gsd_m=%g source_gsd_m=%s augment=%s pretrained=%s checkpoint=%s",
-        device, train_ds.chip_count, len(train_ds), len(val_loader.dataset) if val_loader else "none",
+        "start: device=%s train_chips=%d val_chips=%s batch_size=%d steps/epoch=%d epochs=%d lr=%g "
+        "weight_decay=%g warmup=%d encoder_lr_factor=%g layer_decay=%g freeze_encoder=%s unfreeze_from=%s "
+        "drop_path=%g amp=%s monitor=%s params=%.1fM trainable=%.1fM model_gsd_m=%g augment=%s pretrained=%s "
+        "checkpoint=%s",
+        device, len(train_ds), len(val_loader.dataset) if val_loader else "none",
         cfg.batch_size, steps_per_epoch, cfg.epochs, cfg.learning_rate, cfg.weight_decay, cfg.warmup_steps,
-        cfg.encoder_lr_factor, cfg.layer_decay, cfg.freeze_encoder, cfg.unfreeze_from, cfg.drop_path_rate, cfg.amp, cfg.monitor,
-        sum(param.numel() for param in model.parameters()) / 1e6, trainable / 1e6, pre.model_gsd_m, source_gsd_m,
+        cfg.encoder_lr_factor, cfg.layer_decay, cfg.freeze_encoder, cfg.unfreeze_from, cfg.drop_path_rate, cfg.amp,
+        cfg.monitor, sum(param.numel() for param in model.parameters()) / 1e6, trainable / 1e6, pre.model_gsd_m,
         cfg.augment, pretrained and checkpoint is None,
         checkpoint if checkpoint is None or isinstance(checkpoint, (str, Path)) else "<stream>",
     )  # fmt: skip
@@ -347,5 +349,5 @@ def train(
         best_value,
     )
     return TrainResult(
-        model=model.to("cpu").eval(), history=history, best_epoch=best_epoch, best_value=float(best_value)
-    )
+        model=model.to("cpu").eval(), history=history, best_epoch=best_epoch, best_value=float(best_value),
+    )  # fmt: skip

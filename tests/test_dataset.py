@@ -1,48 +1,43 @@
+import json
+
 import numpy as np
 import pytest
 from PIL import Image
+from pyproj import Transformer
 
+from conftest import CHIP_NAME, COARSE_NAME
 from ss_hot.dataset import (
-    IGNORE,
+    BACKGROUND,
     SEAGRASS,
     LabelSource,
-    assemble_block,
-    chips_per_side,
-    dataset_blocks,
-    fit_window,
-    grid_windows,
-    plan_blocks,
+    fit_tile,
     read_mask,
     scale_mask,
     scale_pair,
     spatial_split,
 )
-from ss_hot.params import PreprocessParams
+from ss_hot.params import MODEL_GSD_M, PreprocessParams
+from ss_hot.tiles import chip_scale, tile_transform
 
 
-def test_masks_only_take_background_seagrass_and_ignore(tmp_path):
+def test_masks_only_take_background_and_seagrass(tmp_path):
     path = tmp_path / "m.png"
-    Image.fromarray(np.array([[0, 1, 255]], dtype=np.uint8)).save(path)
-    assert read_mask(path).tolist() == [[0, 1, 255]]
-    Image.fromarray(np.array([[0, 128]], dtype=np.uint8)).save(path)
-    with pytest.raises(ValueError, match="0, 1 or 255"):
+    Image.fromarray(np.array([[0, 1, 1]], dtype=np.uint8)).save(path)
+    assert read_mask(path).tolist() == [[0, 1, 1]]
+    Image.fromarray(np.array([[0, 255]], dtype=np.uint8)).save(path)
+    with pytest.raises(ValueError, match="0 or 1"):
         read_mask(path)
 
 
 def test_a_downscaled_mask_keeps_the_majority_label():
     mask = np.zeros((4, 4), dtype=np.uint8)
-    mask[:, :3] = SEAGRASS  # three quarters seagrass
-    mask[0, 0] = IGNORE
+    mask[:, :3] = SEAGRASS  # the left column of the result is all seagrass, the right one half
     small = scale_mask(mask, 2, 2)
-    assert small.tolist() == [[SEAGRASS, BACKGROUND_OR(small[0, 1])], [SEAGRASS, small[1, 1]]]
-    assert small[:, 0].tolist() == [SEAGRASS, SEAGRASS]
-    full_ignore = np.full((4, 4), IGNORE, dtype=np.uint8)
-    assert (scale_mask(full_ignore, 2, 2) == IGNORE).all()
-
-
-def BACKGROUND_OR(value):  # the right column is half seagrass: either label is a valid majority
-    assert value in (0, SEAGRASS)
-    return value
+    assert small[:, 0].tolist() == [SEAGRASS, SEAGRASS] and set(small[:, 1].tolist()) <= {
+        BACKGROUND,
+        SEAGRASS,
+    }
+    assert scale_mask(mask, 4, 4).tolist() == mask.tolist()
 
 
 def test_label_source_reads_a_mask_folder_and_a_geojson(mask_dataset, geojson_dataset):
@@ -52,57 +47,54 @@ def test_label_source_reads_a_mask_folder_and_a_geojson(mask_dataset, geojson_da
     source = LabelSource.from_path(labels)
     assert source.masks_dir is None and len(source.polygons) == 1
     mask = source.mask(next(chips.iterdir()), 256, 256)
-    assert mask[:128, :128].mean() == SEAGRASS and mask[130:, 130:].max() == 0
+    assert mask[:128, :128].min() == SEAGRASS and mask[130:, 130:].max() == 0
     half = source.mask(next(chips.iterdir()), 64, 64)  # drawn at the scaled size, so edges stay sharp
     assert half[:32, :32].min() == SEAGRASS and half[33:, 33:].max() == 0
 
 
-def test_a_chip_without_a_mask_is_ignored(mask_dataset, tmp_path):
+def test_geojson_labels_on_a_plain_tile_are_placed_by_its_name(write_chip, tmp_path):
+    chip = write_chip(name=CHIP_NAME, folder=tmp_path / "chips", crs=None)
+    t = tile_transform(CHIP_NAME, 256, 256)
+    to_lonlat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform
+    corners = [(0, 0), (128, 0), (128, 128), (0, 128), (0, 0)]
+    square = [list(to_lonlat(t.c + col * t.a, t.f + row * t.e)) for col, row in corners]
+    labels = tmp_path / "labels.geojson"
+    feature = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [square]}}
+    labels.write_text(json.dumps({"type": "FeatureCollection", "features": [feature]}))
+    mask = LabelSource.from_path(labels).mask(chip, 256, 256)
+    assert mask[2:126, 2:126].min() == SEAGRASS and mask[130:, :].max() == 0 and mask[:, 130:].max() == 0
+
+
+def test_a_tile_without_a_mask_raises(mask_dataset):
     images, masks, names = mask_dataset
     (masks / f"{names[0][:-4]}.png").unlink()
-    assert (LabelSource(masks_dir=masks).mask(images / names[0], 8, 8) == IGNORE).all()
+    with pytest.raises(FileNotFoundError):
+        LabelSource(masks_dir=masks).mask(images / names[0], 8, 8)
 
 
-def test_scale_pair_uses_the_serving_scale_and_an_explicit_resolution(mask_dataset):
+def test_scale_pair_keeps_a_training_tile_and_upscales_a_coarse_one(mask_dataset, write_chip, tmp_path):
     images, masks, names = mask_dataset
     source = LabelSource(masks_dir=masks)
     image, mask = scale_pair(images / names[0], source, PreprocessParams())
-    assert image.shape == (3, 318, 318) and mask.shape == (318, 318)  # 256 px * 3.73 cm / 3 cm
-    image, mask = scale_pair(images / names[0], source, PreprocessParams(), source_gsd_m=0.015)
-    assert image.shape == (3, 128, 128) and (mask == SEAGRASS).all()
+    assert image.shape == (3, 256, 256) and (mask == SEAGRASS).all()
+    coarse = write_chip(name=COARSE_NAME, folder=tmp_path / "coarse", crs=None)
+    Image.fromarray(np.ones((256, 256), dtype=np.uint8)).save(masks / f"{COARSE_NAME[:-4]}.png")
+    image, mask = scale_pair(coarse, source, PreprocessParams())
+    side = round(256 * chip_scale(COARSE_NAME, 256, MODEL_GSD_M))
+    assert image.shape == (3, side, side) and mask.shape == (side, side) and (mask == SEAGRASS).all()
 
 
-def test_neighbouring_chips_form_blocks_and_gaps_are_ignored(mask_dataset):
-    images, masks, names = mask_dataset
-    assert chips_per_side(128) == 4 and chips_per_side(600) == 1
-    blocks = plan_blocks(names, 2)
-    assert len(blocks) == 1 and sorted((col, row) for _, col, row in blocks[0]) == [
-        (0, 0),
-        (0, 1),
-        (1, 0),
-        (1, 1),
-    ]
-    assert len(plan_blocks(names, 1)) == 4
-    pre = PreprocessParams()
-    block = [entry for entry in blocks[0] if entry[1:] != (1, 1)]  # drop the bottom-right chip
-    image, mask = assemble_block(block, images, LabelSource(masks_dir=masks), pre, source_gsd_m=0.015)
-    assert image.shape == (3, 256, 256)
-    assert (
-        (mask[:, :128] == SEAGRASS).all()
-        and (mask[:128, 128:] == 0).all()
-        and (mask[128:, 128:] == IGNORE).all()
-    )
-    assert len(dataset_blocks(images, pre, source_gsd_m=0.015)) == 1  # 128 px chips: four per 512 px side
-
-
-def test_windows_are_padded_with_ignore_and_cropped_at_random():
-    image = np.ones((3, 300, 700), dtype=np.float32)
-    mask = np.ones((300, 700), dtype=np.uint8)
-    fitted_image, fitted_mask = fit_window(image, mask, 512, np.random.default_rng(0))
-    assert fitted_image.shape == (3, 512, 512) and (fitted_mask[300:] == IGNORE).all()
-    assert (fitted_mask[:300] == 1).all()
-    pieces = grid_windows(image, mask, 512)
-    assert len(pieces) == 2 and (pieces[1][1][:, 188:] == IGNORE).all()
+def test_fit_tile_crops_a_larger_tile_and_reflects_a_smaller_one_with_its_labels():
+    image = np.random.default_rng(0).random((3, 300, 700), dtype=np.float32)
+    mask = (np.arange(700)[None, :] < 350).repeat(300, axis=0).astype(np.uint8)
+    cropped_image, cropped_mask = fit_tile(image, mask, 256, np.random.default_rng(0))
+    assert cropped_image.shape == (3, 256, 256) and cropped_mask.shape == (256, 256)
+    small_image, small_mask = image[:, :200, :200], mask[:200, :200].copy()
+    small_mask[:, 150:] = BACKGROUND
+    padded_image, padded_mask = fit_tile(small_image, small_mask, 256)
+    assert np.array_equal(padded_mask[:, 200:], small_mask[:, :143:-1])  # mirrored with the image
+    assert np.array_equal(padded_image[0, :200, 200:], small_image[0, :, :143:-1])
+    assert np.array_equal(fit_tile(image[:, :256, :256], mask[:256, :256], 256)[1], mask[:256, :256])
 
 
 def test_spatial_split_keeps_blocks_together():

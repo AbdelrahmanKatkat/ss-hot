@@ -1,7 +1,8 @@
-"""Inference: directory of OAM chips -> scale -> windows -> ONNX -> seagrass probability. Nothing is decoded here.
+"""Inference: directory of OAM tiles -> scale -> windows -> ONNX -> seagrass probability. Nothing is decoded here.
 
-1. `preprocess_chip`: `model_gsd_m`, `max_input_px` (the scale), then fixed-size windows.
-2. the ONNX graph (`image (N, 3, 512, 512)` -> `probability (N, 512, 512)`): no keys.
+1. `preprocess_chip`: `model_gsd_m` (a tile at the training zoom is used as it is; a coarser one is upscaled), then
+   fixed-size windows.
+2. the ONNX graph (`image (N, 3, 256, 256)` -> `probability (N, 256, 256)`): no keys.
 
 `predict_session` returns each chip's stitched probability and metadata. The rest is the postprocess
 (`postprocess.py`, `postprocess_outputs`): decode with the `PostprocessParams` keys, then georeference to EPSG:4326.

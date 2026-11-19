@@ -1,13 +1,13 @@
 """Entry point to `ss_hot.train`: fine-tune the seagrass UPerNet and write `<name>.pt`, `<name>.onnx` and `history.json`.
 
-    python scripts/finetune.py --train-images F:/HOTOSM/seagrass/data/train/images \
-        --train-labels F:/HOTOSM/seagrass/data/train/masks --val-images .../validation/images \
-        --val-labels .../validation/masks --source-gsd-m 0.0092 --out data/runs/upernet --params '{"epochs": 30}'
+    python scripts/finetune.py --train-images <train>/chips --train-labels <train>/labels/labels.geojson \
+        --val-images <validation>/chips --val-labels <validation>/labels/labels.geojson \
+        --out data/runs/upernet --params '{"epochs": 30}'
 
-Labels are a mask folder (`<stem>.png`, 0 / 1 / 255) or one GeoJSON over georeferenced chips. `--source-gsd-m` is
-needed only when chip names do not describe their real footprint. Training options go in `--params` (JSON, the
-`TrainParams` keys); anything left out keeps its default. Needs the `train` extra; with a local CUDA torch use the
-venv python (or `uv run --no-sync`), not a plain `uv run`.
+Chips are georeferenced `OAM-<x>-<y>-<z>.tif`; labels are one GeoJSON of seagrass polygons (the fAIr layout). Training
+options go in `--params` (JSON, the `TrainParams` keys); anything left out keeps its default. Choose the serving
+threshold afterwards with `scripts/evaluate.py` on the validation chips. Needs the `train` extra; with a local CUDA
+torch use the venv python (or `uv run --no-sync`), not a plain `uv run`.
 """
 
 import argparse
@@ -29,7 +29,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-labels", required=True, type=Path)
     parser.add_argument("--val-images", type=Path)
     parser.add_argument("--val-labels", type=Path)
-    parser.add_argument("--source-gsd-m", type=float, help="metres per chip pixel, if chip names are wrong")
     parser.add_argument(
         "--weights", type=Path, help="a <name>.pt to continue; default: ImageNet encoder weights"
     )
@@ -54,7 +53,7 @@ def main() -> None:
         train_images_dir=args.train_images, train_labels=args.train_labels,
         val_images_dir=args.val_images, val_labels=args.val_labels,
         cfg=parse_train_params(params), pre=parse_preprocess_params(params),
-        checkpoint=args.weights, pretrained=args.weights is None, source_gsd_m=args.source_gsd_m,
+        checkpoint=args.weights, pretrained=args.weights is None,
         num_workers=args.num_workers, epoch_checkpoint_dir=args.out / "epochs",
     )  # fmt: skip
     torch.save(result.model.state_dict(), args.out / f"{args.name}.pt")

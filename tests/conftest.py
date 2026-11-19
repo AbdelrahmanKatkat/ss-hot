@@ -10,10 +10,12 @@ from rasterio.transform import from_origin
 ORIGIN_X, ORIGIN_Y = (
     1_000_000.0,
     2_000_000.0,
-)  # top-left corner of every synthetic georeferenced chip, EPSG:3857
+)  # top-left corner of every synthetic georeferenced tile, EPSG:3857
 
-# A zoom-22 tile near the equator: a 256 px chip has 3.73 cm pixels, so at the default 3 cm it scales by about 1.24.
-CHIP_NAME = "OAM-2097152-2097152-22.tif"
+# A zoom-24 training tile in Timor-Leste: 0.923 cm pixels, within 2% of the model resolution, so it is not resampled.
+CHIP_NAME = "OAM-14246392-8787682-24.tif"
+# A zoom-22 tile near the equator: 3.73 cm pixels, upscaled x 4.06 (256 -> 1039 px) to the model resolution.
+COARSE_NAME = "OAM-2097152-2097152-22.tif"
 
 
 class FakeSession:
@@ -36,13 +38,13 @@ class FakeSession:
         self.shapes.append(windows.shape)
         probability = np.zeros((windows.shape[0], *windows.shape[2:]), dtype=np.float32)
         if self.value is not None:
-            probability[:, 100:300, 100:300] = self.value
+            probability[:, 100:200, 100:200] = self.value
         return [probability]
 
 
 @pytest.fixture
 def write_chip(tmp_path):
-    """Write a synthetic RGB chip: a georeferenced GeoTIFF (EPSG:3857, 1 m pixels) or, with `crs=None`, a plain one."""
+    """Write a synthetic RGB tile: a georeferenced GeoTIFF (EPSG:3857, 1 m pixels) or, with `crs=None`, a plain one."""
 
     def _write(
         name: str = CHIP_NAME, size: int = 256, folder=None, crs: str | None = "EPSG:3857", seed: int = 0
@@ -62,7 +64,7 @@ def write_chip(tmp_path):
 
 
 def lon_lat(col: float, row: float) -> list[float]:
-    """Longitude and latitude of pixel `(col, row)` of a synthetic georeferenced chip."""
+    """Longitude and latitude of pixel `(col, row)` of a synthetic georeferenced tile."""
     return list(
         Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform(
             ORIGIN_X + col, ORIGIN_Y - row
@@ -72,13 +74,13 @@ def lon_lat(col: float, row: float) -> list[float]:
 
 @pytest.fixture
 def mask_dataset(tmp_path, write_chip):
-    """A 2 x 2 grid of plain 256 px chips (z22 names) with masks: the left column all seagrass, the right one not."""
+    """A 2 x 2 grid of plain 256 px zoom-24 tiles with 0/1 masks: the left column all seagrass, the right one not."""
     images, masks = tmp_path / "images", tmp_path / "masks"
     masks.mkdir()
     names = []
     for dx in range(2):
         for dy in range(2):
-            name = f"OAM-{2097152 + dx}-{2097152 + dy}-22.tif"
+            name = f"OAM-{2**23 + dx}-{2**23 + dy}-24.tif"
             write_chip(name=name, folder=images, crs=None, seed=dx * 2 + dy)
             Image.fromarray(np.full((256, 256), 1 if dx == 0 else 0, dtype=np.uint8)).save(
                 masks / f"{name[:-4]}.png"
@@ -89,7 +91,7 @@ def mask_dataset(tmp_path, write_chip):
 
 @pytest.fixture
 def geojson_dataset(tmp_path, write_chip):
-    """One georeferenced chip and a GeoJSON with a seagrass square over its top-left 128 x 128 px."""
+    """One georeferenced tile and a GeoJSON with a seagrass square over its top-left 128 x 128 px."""
     chips, labels = tmp_path / "chips", tmp_path / "labels"
     labels.mkdir()
     write_chip(name=CHIP_NAME, folder=chips)

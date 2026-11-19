@@ -1,7 +1,9 @@
-"""Chip -> model input: one resize to the model's ground resolution, then fixed-size windows.
+"""Tile -> model input: a resize to the model's ground resolution only when needed, then fixed-size windows.
 
-1. `scale_rgb`: RGB uint8 `(H, W, 3)` -> float32 `(3, H', W')` in [0, 1], one resize (`H' = round(H * scale)`).
-2. `to_windows`: pad the scaled chip (reflected image) to whole `WINDOW_PX` windows -> `(N, 3, WINDOW_PX, WINDOW_PX)`.
+1. `scale_rgb`: RGB uint8 `(H, W, 3)` -> float32 `(3, H', W')` in [0, 1]; a tile at the model resolution (scale 1, the
+   training zoom) is not resampled, a coarser one is upscaled once (`H' = round(H * scale)`).
+2. `to_windows`: pad the scaled tile (reflected image) to whole `WINDOW_PX` windows -> `(N, 3, WINDOW_PX, WINDOW_PX)`;
+   a 256 px tile at the model resolution is exactly one window.
 
 The ONNX graph normalises (ImageNet statistics) itself, so this module only scales, pads and cuts. `stitch_windows`
 puts the per-window probabilities back together and crops the padding, giving one `(H', W')` probability per chip;
@@ -29,7 +31,7 @@ class PreprocessMeta:
     resized_height: int
     rows: int  # windows down and across the padded chip
     cols: int
-    transform: Any = None  # the chip's affine transform (identity-like for a chip without georeferencing)
+    transform: Any = None  # the chip's affine transform
     crs: Any = None
 
     @property
@@ -44,7 +46,8 @@ class PreprocessMeta:
 def read_chip(image_path: str | Path) -> tuple[np.ndarray, Any, Any]:
     """Bands 1-3 as uint8 `(H, W, 3)` RGB plus the chip's affine transform and CRS.
 
-    A PNG/JPEG (or a TIFF without georeferencing) has no CRS: the transform is the identity and the CRS is `None`.
+    fAIr chips are GeoTIFFs. A file without georeferencing gets the identity transform and no CRS; its polygons stay in
+    chip pixels.
     """
     import rasterio
 
@@ -88,13 +91,18 @@ def to_windows(image: np.ndarray, window: int = WINDOW_PX) -> tuple[np.ndarray, 
     return np.ascontiguousarray(windows, dtype=np.float32), rows, cols
 
 
-def stitch_windows(probabilities: np.ndarray, meta: PreprocessMeta) -> np.ndarray:
-    """`(rows * cols, window, window)` window outputs -> the `(H', W')` probability of the scaled chip (padding cut)."""
+def stitch_grid(probabilities: np.ndarray, height: int, width: int) -> np.ndarray:
+    """`(rows * cols, window, window)` window outputs -> the `(height, width)` image they cover (padding cut)."""
     windows = np.asarray(probabilities, dtype=np.float32)
     window = windows.shape[-1]
-    full = windows.reshape(meta.rows, meta.cols, window, window).transpose(0, 2, 1, 3)
-    full = full.reshape(meta.rows * window, meta.cols * window)
-    return full[: meta.resized_height, : meta.resized_width]
+    rows, cols = window_grid(height, width, window)
+    full = windows.reshape(rows, cols, window, window).transpose(0, 2, 1, 3)
+    return full.reshape(rows * window, cols * window)[:height, :width]
+
+
+def stitch_windows(probabilities: np.ndarray, meta: PreprocessMeta) -> np.ndarray:
+    """`(rows * cols, window, window)` window outputs -> the `(H', W')` probability of the scaled tile (padding cut)."""
+    return stitch_grid(probabilities, meta.resized_height, meta.resized_width)
 
 
 def preprocess_rgb(
@@ -111,13 +119,10 @@ def preprocess_rgb(
 
 
 def preprocess_chip(
-    image_path: str | Path, cfg: PreprocessParams | None = None, *, source_gsd_m: float | None = None
+    image_path: str | Path, cfg: PreprocessParams | None = None
 ) -> tuple[np.ndarray, PreprocessMeta]:
-    """Read a chip named `OAM-<x>-<y>-<z>.<ext>`, derive the scale from its zoom (or `source_gsd_m`), preprocess it."""
+    """Read a tile named `OAM-<x>-<y>-<z>.<ext>`, derive the scale from its zoom, preprocess it."""
     cfg = cfg or PreprocessParams()
     rgb, transform, crs = read_chip(image_path)
-    scale = chip_scale(
-        Path(image_path).name, rgb.shape[1], cfg.model_gsd_m, height_px=rgb.shape[0],
-        max_input_px=cfg.max_input_px, source_gsd_m=source_gsd_m,
-    )  # fmt: skip
+    scale = chip_scale(Path(image_path).name, rgb.shape[1], cfg.model_gsd_m)
     return preprocess_rgb(rgb, scale, transform=transform, crs=crs)

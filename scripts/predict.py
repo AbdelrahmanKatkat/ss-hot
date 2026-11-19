@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument("--chips", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument(
-        "--params", default="{}", help='JSON, for example {"threshold": 0.5, "min_area_px": 278}'
+        "--params", default="{}", help='JSON, for example {"threshold": 0.5, "min_area_m2": 0.25}'
     )
     args = parser.parse_args()
     logging.basicConfig(
