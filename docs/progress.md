@@ -111,6 +111,41 @@ bottom.
   new masks always hold slightly less seagrass. Limit set to 0.97 with that note; an overlay of the worst chip shows the
   polygons match.
 
+### Job A: first base-model run (2026-11-21)
+- [x] timm 1.0.31 in the HOTOSM root `.venv` (installed by the user, CUDA torch kept): full suite **62 passed**
+  (ONNX parity at 256 px included). ConvNeXt-T ImageNet weights downloaded once (110 MB) to
+  `~/.cache/huggingface/hub/models--timm--convnext_tiny.fb_in22k_ft_in1k`.
+- [x] Pilot (550 tiles, 1 epoch, batch 8): loss 1.32 → 0.91, 0.1 s/step, peak GPU 2.0 GB (RTX 4060 Laptop, 8 GB).
+- [x] Full run `data/runs/upernet` (`freeze_encoder=false`, `batch_size=16`, other defaults): 2:40–3:50 per epoch,
+  early stop after 16 epochs (47 min), kept epoch 8 (validation IoU 0.253 at 0.5); peak GPU 3.1 GB; train loss 0.85 →
+  0.66. Validation IoU swung 0.19–0.25 between epochs while validation loss kept falling: a noisy selection signal.
+- [x] Threshold sweep through the ONNX (CPU, as served; `validation_metrics.json`, `test_metrics.json`):
+  validation best F1 0.411 (IoU 0.259) at **0.40**; precision stays 0.22–0.38 at every threshold up to 0.8 (the model
+  finds seagrass the under-mapped validation labels lack). Test at 0.40: precision 0.845, recall 0.450, **F1 0.587,
+  IoU 0.416**; test's own best would be 0.10 (F1 0.730), i.e. validation and test pull the threshold in opposite
+  directions.
+- [x] ONNX vs torch on the trained weights: largest difference 7.2e-7. `predict.py` on 6 test chips: 0.3 s, 9 polygons.
+  Overlay: predictions follow the labelled meadows where texture differs, but whole labelled tiles of uniform grey
+  bottom get little or no prediction; at zoom 24 a tile shows only 2.4 m of seabed.
+- [x] T0 diagnosis (`research/diagnose_errors.py`, threshold 0.40): on its own training tiles recall 0.93 (55908's
+  0.89), on test (all 55908, one held-out end of the flight) recall 0.45 with mean probability 0.36 inside labels (0.81
+  on train): a gap between areas, not unlearnable labels; edge band 0.44 vs centre 0.45, so not tile borders. Test was
+  one project and validation 93% 55909 (60% empty tiles).
+
+### T1: option B split (2026-11-21)
+- [x] `research/resplit_blocks.py` → `F:\HOTOSM\seagrass\data\fair_v2` (fAIr layout, chips hard-linked to `fair/`):
+  all 17,688 tiles pooled; per project, 16 x 16-tile blocks (38 m) held out whole, about 10% validation and 10% test;
+  seed 55 of 200 (closest held-out seagrass shares); 2-tile (4.7 m) buffer ring between splits, dropped. Result: train
+  11,908 / validation 1,844 / test 2,256 / buffer 1,680; every project has validation and test blocks (seagrass share
+  of each within 0.05 of its project's); 0 touching pairs; masks from the new labels vs the PNG masks 99.6% (every 10th
+  chip); `split_map.png`, `splits.json`, `manifest.json`. The labels are treated as complete (decision): the old
+  validation tiles are back in the pool.
+- [ ] T1 = T0 settings (`freeze_encoder=false`, `batch_size=16`) on `fair_v2` → `data/runs/t1_upernet`; then threshold
+  sweep on validation, test at that threshold, diagnosis per project. T0 cannot be scored on the new test (it trained
+  on some of those tiles).
+- [ ] Next experiments (T2+): epoch choice by validation loss or best-threshold F1; context (zoom-22 resolution);
+  drop path 0.3 / `encoder_lr_factor` 0.81 (docs/tuning.md); U-Net control.
+
 ### Design notes
 - The ONNX graph takes fixed 256 px windows with a dynamic batch: the UPerNet pyramid pooling exports only for a
   static size, and its scales are (1, 2, 4, 8) instead of (1, 2, 3, 6) so that they divide the 8 x 8 deepest map.
