@@ -91,9 +91,25 @@ bottom.
   the U-Net control and the border-band metric are experiments, moved to `research/unet_control.py` and
   `research/border_band.py`; the threshold sweep is no longer inside `train()` (it is `scripts/evaluate.py` on
   validation).
-- [ ] The local dataset (`F:\HOTOSM\seagrass\data`) is still `images/` (not georeferenced) + `masks/` + per-tile
-  `labels/`: convert each split to the fAIr layout (`chips/` georeferenced EPSG:3857 GeoTIFFs + `labels/labels.geojson`).
-- [ ] Recreate the `.venv` (`uv sync --extra test`), install `timm` (asked first), run the full test suite.
+- [x] `freeze_encoder` is now **True** by default (only the decoder trains unless `freeze_encoder=False` or
+  `unfreeze_from` is set), as the finetune skill asks. The base-training run must pass `freeze_encoder=False`.
+- [x] Tuning survey → `docs/tuning.md` (83 sources): full training for the base model, decoder-only for user
+  fine-tunes (opt-in `unfreeze_from=stage3` at a low `encoder_lr_factor`), cheap regularisers (layer decay, L2-SP),
+  BatchNorm re-estimation, a short warm-up for small fine-tunes, threshold re-sweep; 11 `research/` experiments
+  listed. Summarised in `docs/research.md` §6; nothing else applied yet.
+- [x] Tests run with the HOTOSM root `.venv` (Python 3.12.9: pytest, rasterio, CUDA torch 2.14.1+cu126, onnx,
+  onnxruntime; no timm), `PYTHONPATH=src`: **57 passed, 1 skipped** (`test_model.py`, needs timm). Installing timm
+  there (`uv pip install --no-deps timm`, to keep the CUDA torch) was blocked by the permission check: left to the user.
+- [x] `research/convert_to_fair_layout.py` converted the local dataset to the fAIr layout in
+  `F:\HOTOSM\seagrass\data\fair\<split>\chips` (georeferenced EPSG:3857 GeoTIFFs, deflate, pixels unchanged; 770 MB)
+  and `<split>\labels\labels.geojson` (one full polygon per OSM feature: the clipped pieces of the 4,498 source chips
+  merged by OSM id; 16,874 features, of which train 14,838 / validation 767 / test 1,220 touch a chip of the split);
+  `manifest.json` and `F:\HOTOSM\seagrass\data\fair_layout.log`. Checks: 0 chips moved, 0 pixels changed; masks redrawn
+  by `LabelSource` agree with the old `masks/` at 99.52% / 99.86% / 99.71% (mean), worst 97.80% / 98.75% / 98.80%.
+  The first run used a 0.98 limit and failed on 2 train chips: the old masks were drawn by tm_dataset with PIL on
+  exterior rings only (edge pixels included, holes filled); 82–100% of the differing pixels are on polygon edges and the
+  new masks always hold slightly less seagrass. Limit set to 0.97 with that note; an overlay of the worst chip shows the
+  polygons match.
 
 ### Design notes
 - The ONNX graph takes fixed 256 px windows with a dynamic batch: the UPerNet pyramid pooling exports only for a

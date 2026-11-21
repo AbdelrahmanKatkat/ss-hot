@@ -79,8 +79,10 @@ class PostprocessParams:
 class TrainParams:
     """Fine-tuning knobs for UPerNet on ConvNeXt-Tiny (see docs/research.md).
 
-    The whole network trains; the encoder at `encoder_lr_factor` of the decoder's learning rate, with a layer-wise
-    decay. With `freeze_encoder` only the stages from `unfreeze_from` on train in the encoder.
+    By default the encoder is frozen and only the decoder trains (`freeze_encoder`), so fine-tuning on a new site does
+    not erase what the encoder learnt; `unfreeze_from` lets the ConvNeXt stages from that one on train as well. With
+    `freeze_encoder=False` the whole network trains, the encoder at `encoder_lr_factor` of the decoder's learning
+    rate with a layer-wise decay. See docs/tuning.md.
     """
 
     epochs: int = 40
@@ -90,7 +92,7 @@ class TrainParams:
     max_grad_norm: float = 1.0  # 0 disables clipping
     scheduler: str = "cosine"  # "cosine" | "none"; cosine decays to 0 over all steps (stepped per batch)
     warmup_steps: int = 400  # linear learning-rate ramp over the first batches (0 = none)
-    freeze_encoder: bool = False
+    freeze_encoder: bool = True
     unfreeze_from: str = "none"  # with freeze_encoder: still train ConvNeXt stages from this one on
     encoder_lr_factor: float = (
         1.0  # learning-rate multiplier for the whole encoder (1.0 = same as the decoder)

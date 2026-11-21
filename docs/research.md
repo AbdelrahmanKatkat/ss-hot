@@ -11,6 +11,7 @@ Claims marked **[V]** in the reports were read in the source, **[?]** only secon
 | Augmentation | [`augmentation.md`](augmentation.md) | 43 |
 | Postprocessing | [`postprocessing.md`](postprocessing.md) | 57 |
 | Models | [`model.md`](model.md) | 35 |
+| Tuning and fine-tuning | [`tuning.md`](tuning.md) | 83 |
 
 Setting the reports were asked about: RGB-only drone orthomosaics from OpenAerialMap, shallow tropical water
 (Timor-Leste), 256 px web-map tiles (training tiles zoom 24, about 0.92 cm per pixel), binary segmentation, ONNX on
@@ -99,7 +100,33 @@ non-commercial licences are acceptable after all, so the licence findings below 
   backbone (licence needs review), (4) UPerNet + Swin-T, (5) SAM2-UNet (research only). Keep (1) if it beats the
   U-Net control on held-out sites and its 256 px ONNX export matches PyTorch.
 
-## 6. What this means for ss-hot
+## 6. Tuning and fine-tuning
+
+Two jobs: (a) training the base model from ImageNet weights on our 13.7k tiles; (b) fAIr users fine-tuning that base
+model on a few hundred chips of their own site. Numbers below come from the report; spot-check them before they drive a
+decision.
+
+- Our base recipe matches the official ConvNeXt-T UPerNet ADE20K recipe on AdamW lr 1e-4, weight decay 0.05 and
+  layer decay 0.9; it differs on drop path (official 0.4, ours 0.1), batch (16 with SyncBN vs our 8) and gradient
+  clipping (official none). The official decay puts the whole encoder one step lower than ours:
+  `encoder_lr_factor` 0.81 reproduces it.
+- **Base training should train everything:** pretraining stops being decisive between 3.5k and 10k images. Since the
+  library default is now a frozen encoder, the base run must pass `freeze_encoder=False`. A 1–2 epoch decoder-only
+  warm-up before full training (LP-FT) helped out-of-distribution accuracy in classification; untested for segmentation.
+- **User fine-tuning:** freezing always trades target fit for source retention (Cityscapes→ACDC: forgetting 26.1 →
+  18.9 mIoU, target 43.6 → 32.5; same pattern on our tree detector). Decoder-only is the safe default; `unfreeze_from=
+  stage3` with a low `encoder_lr_factor` (0.1–0.4) is the opt-in when the target is under-fitted.
+- Cheap regularisers do most of the work: on PASCAL-Context with Swin-T, plain fine-tuning 66.0 / 44.0 mIoU (clean /
+  out-of-distribution), layer decay 72.1 / 54.5, L2-SP (pull toward the starting weights) 73.5 / 56.7. Replaying
+  source tiles is the strongest anti-forgetting tool; EWC is weak.
+- Site and sensor shift sits in the early layers and the normalisation statistics. Re-estimating the decoder's
+  BatchNorm statistics on the user's chips needs no labels and leaves the ONNX graph unchanged.
+- Parameter-efficient fine-tuning on ConvNeXt + UPerNet is about 1–2 mIoU below full fine-tuning on ADE20K; only
+  mergeable forms (LoRA merged before export, bias/norm-only) keep one ONNX graph. Untested in our setting.
+- BCE + Dice is sound, but Dice makes outputs over-confident: re-sweep the threshold after every fine-tune.
+  `warmup_steps` 400 is about ten epochs on 300 chips at batch 8; user fine-tunes need about one epoch of warm-up.
+
+## 7. What this means for ss-hot
 
 The model stays UPerNet + ConvNeXt-Tiny v1. Applied on 2026-11-20 (see `progress.md`):
 
@@ -132,6 +159,12 @@ tiles. Those are upscaled once to 0.92 cm (zoom 23 x 2, zoom 22 x 4; zoom 21 and
   library's training loop, to justify UPerNet.
 - The README states that the test split shares imagery with training; an outside test (SeagrassMapper) needs a
   download.
+
+**Tuning (from §6, not applied yet):** the encoder is frozen by default (applied 2026-11-21); the base run sets
+`freeze_encoder=False`. To decide with small `research/` experiments (E1–E11 in `tuning.md`): `encoder_lr_factor` 0.81
+vs 1.0, drop path 0.1 vs 0.3, a decoder-only warm-up, a short warm-up for user fine-tunes, decoder BatchNorm
+re-estimation, L2-SP toward the base weights, base/fine-tuned weight averaging, merged LoRA, replay of base tiles
+(needs fAIr to give a user's step the base tiles).
 
 **Later:** overlapping-window serving across neighbouring tiles (if the border metric shows it matters);
 semi-supervised training on unlabelled drone imagery; merging polygons across tiles (shapely); ConvNeXt V2-T as the

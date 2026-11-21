@@ -66,6 +66,10 @@ zoom-24 chips: train 13,736, validation 1,960, test 1,992, split spatially with 
 same four drone flights as training (other ground, same imagery), so test scores are not a measure of how the model
 does on new imagery; an outside test set (for example DTU SeagrassMapper) would need a download.
 
+The encoder is frozen by default (`freeze_encoder=True`): only the decoder trains, so fine-tuning on a new site keeps
+what the encoder knows. `unfreeze_from` (`stage0`..`stage3`) lets later ConvNeXt stages train too, and
+`freeze_encoder=False` trains everything (with `encoder_lr_factor` and a layer-wise decay).
+
 Training augmentation (`TrainParams`, docs/augmentation.md): quarter turns and mirrors, brightness / contrast / gamma,
 zoom-in jitter, randomised histogram matching and CutMix against another training chip, a down-and-up resample (fAIr
 can send coarser chips than the training zoom; they are upscaled at serving), and blur / JPEG. No hue or saturation

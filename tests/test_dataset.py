@@ -54,7 +54,7 @@ def test_fit_tile_crops_a_larger_chip_and_reflects_a_smaller_one_with_its_labels
     small_image, small_mask = image[:, :200, :200], mask[:200, :200].copy()
     small_mask[:, 150:] = BACKGROUND
     padded_image, padded_mask = fit_tile(small_image, small_mask, 256)
-    assert np.array_equal(padded_mask[:, 200:], small_mask[:, :143:-1])  # mirrored with the image
+    assert np.array_equal(padded_mask[:200, 200:], small_mask[:, :143:-1])  # mirrored with the image
     assert np.array_equal(padded_image[0, :200, 200:], small_image[0, :, :143:-1])
     assert np.array_equal(fit_tile(image[:, :256, :256], mask[:256, :256], 256)[1], mask[:256, :256])
 

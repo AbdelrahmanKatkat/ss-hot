@@ -23,17 +23,11 @@ def test_aliases_and_overrides():
     assert parse_postprocess_params({"confidence_threshold": 0.7}).threshold == 0.7
     assert parse_postprocess_params({"threshold": 0.4, "confidence_threshold": 0.7}).threshold == 0.4
     assert parse_postprocess_params({"min_area_m2": "1.5"}).min_area_m2 == 1.5
-    cfg = parse_train_params(
-        {
-            "lr": "3e-4",
-            "freeze_backbone": "yes",
-            "unfreeze_from": "stage3",
-            "batch_size": None,
-            "decoder": "UNet",
-        }
-    )
+    assert TrainParams().freeze_encoder  # the encoder is frozen unless asked otherwise
+    cfg = parse_train_params({"lr": "3e-4", "unfreeze_from": "stage3", "batch_size": None})
     assert cfg.learning_rate == 3e-4 and cfg.freeze_encoder and cfg.unfreeze_from == "stage3"
-    assert cfg.decoder == "unet" and cfg.batch_size == TrainParams.batch_size  # None keeps the default
+    assert cfg.batch_size == TrainParams.batch_size  # None keeps the default
+    assert not parse_train_params({"freeze_backbone": "no"}).freeze_encoder  # the alias
     assert parse_preprocess_params({"model_gsd_m": "0.01"}).model_gsd_m == 0.01
 
 
@@ -55,11 +49,10 @@ def test_train_params_carry_the_augmentation():
         (parse_augment_params, {"orientation": "mirror"}),
         (parse_augment_params, {"lowres_max": 0.5}),
         (parse_augment_params, {"cutmix_prob": 1.5}),
-        (parse_train_params, {"decoder": "fpn"}),
         (parse_train_params, {"layer_decay": 0}),
         (parse_train_params, {"epochs": 0}),
         (parse_train_params, {"monitor": "accuracy"}),
-        (parse_train_params, {"unfreeze_from": "stage2"}),  # needs freeze_encoder
+        (parse_train_params, {"freeze_encoder": False, "unfreeze_from": "stage2"}),  # needs freeze_encoder
         (parse_train_params, {"epoch_fraction": 0}),
         (parse_train_params, {"amp": "maybe"}),
         (parse_train_params, {"batch_size": True}),
