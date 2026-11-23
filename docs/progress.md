@@ -140,9 +140,17 @@ bottom.
   of each within 0.05 of its project's); 0 touching pairs; masks from the new labels vs the PNG masks 99.6% (every 10th
   chip); `split_map.png`, `splits.json`, `manifest.json`. The labels are treated as complete (decision): the old
   validation tiles are back in the pool.
-- [ ] T1 = T0 settings (`freeze_encoder=false`, `batch_size=16`) on `fair_v2` → `data/runs/t1_upernet`; then threshold
-  sweep on validation, test at that threshold, diagnosis per project. T0 cannot be scored on the new test (it trained
-  on some of those tiles).
+- [x] T1 = T0 settings (`freeze_encoder=false`, `batch_size=16`) on `fair_v2` → `data/runs/t1_upernet`: early stop
+  after 27 epochs (1 h 20 min), kept epoch 19 (validation IoU 0.684 at 0.5). Train loss fell 0.92 → 0.63 while
+  validation IoU stayed 0.67–0.68 from epoch 5.
+- [x] T1 sweep through the ONNX: validation best F1 0.814 / IoU 0.686 at **0.40**; **test at 0.40: precision 0.733,
+  recall 0.899, F1 0.808, IoU 0.677** (unseen ground within the training flights; test's own best is also 0.40).
+- [x] T1 diagnosis (test, 0.40): per project IoU 55908 0.651, **55909 0.418** (precision 0.54, recall 0.65), 55910
+  0.775, 55911 0.739; chips 0–25% seagrass precision 0.31; edge band IoU 0.62 vs centre 0.69; empty chips: 19% of
+  their pixels predicted seagrass (2.9 M of 15.3 M; validation 15%); mean probability 0.76 inside labels, 0.40
+  outside. 68 of 620 55909 test chips are more than half false seagrass; the worst are whole uniform chips labelled
+  empty. In a 21 m view (around -8.530573, 125.695342) the unlabelled ground looks much like the labelled meadow next
+  to it: model error or unmapped seagrass, to be checked by someone who knows the site.
 - [ ] Next experiments (T2+): epoch choice by validation loss or best-threshold F1; context (zoom-22 resolution);
   drop path 0.3 / `encoder_lr_factor` 0.81 (docs/tuning.md); U-Net control.
 
